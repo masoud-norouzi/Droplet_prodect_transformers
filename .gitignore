@@ -1,0 +1,11 @@
+.venv/
+.vscode/
+__pycache__/
+*.pyc
+
+outputs/
+data/
+*.mp4
+*.avi
+*.mov
+*.mkv
