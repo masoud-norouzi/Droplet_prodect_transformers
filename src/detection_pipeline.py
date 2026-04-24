@@ -41,6 +41,7 @@ class ConnectedComponentDetectionConfig:
     max_area_ratio: float = 1.2
     min_area: int = 10
     invert_threshold: bool = False
+    crop_bottom_px: int = 0
 
 
 class VideoFrameExtractor:
@@ -94,6 +95,7 @@ class ConnectedComponentDropletDetector:
         self.config = config
 
     def detect(self, frame_bgr: np.ndarray, frame_id: int) -> pd.DataFrame:
+        frame_bgr = self.crop_frame(frame_bgr)
         gray_frame = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
         threshold_type = (
             cv2.THRESH_BINARY_INV
@@ -179,6 +181,11 @@ class ConnectedComponentDropletDetector:
     def _empty_features() -> pd.DataFrame:
         return pd.DataFrame(columns=FEATURE_COLUMNS)
 
+    def crop_frame(self, frame_bgr: np.ndarray) -> np.ndarray:
+        if self.config.crop_bottom_px > 0:
+            return frame_bgr[: -self.config.crop_bottom_px, :]
+        return frame_bgr
+
 
 class DropletDetectionPipeline:
     def __init__(self, detector: ConnectedComponentDropletDetector):
@@ -207,7 +214,8 @@ class DropletDetectionPipeline:
             overlay_name = f"{frame_name or f'frame_{frame_id:06d}'}_overlay.png"
             overlay_dir = output_dir / "overlays"
             overlay_dir.mkdir(parents=True, exist_ok=True)
-            overlay = self.create_debug_overlay(frame_bgr, features)
+            overlay_frame = self.detector.crop_frame(frame_bgr)
+            overlay = self.create_debug_overlay(overlay_frame, features)
             cv2.imwrite(str(overlay_dir / overlay_name), overlay)
 
         return features

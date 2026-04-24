@@ -73,6 +73,7 @@ def main() -> None:
         ConnectedComponentDetectionConfig(
             threshold=args.threshold,
             invert_threshold=args.invert_threshold,
+            crop_bottom_px=35,
         )
     )
     pipeline = DropletDetectionPipeline(detector)
