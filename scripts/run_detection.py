@@ -17,16 +17,18 @@ from configs.constants import (
     BACKGROUND_THRESHOLD,
     CROP_BOTTOM_PX,
     EXPERIMENT_NAME,
+    FALLBACK_WATERSHED_MIN_DISTANCE,
     FILL_HOLES,
     MAX_BACKGROUND_FRAMES,
     MAX_ASSIGNMENT_DISTANCE,
     MAX_MISSED,
     MAX_SPLIT_OBJECTS,
+    MERGED_AREA_RATIO,
     MIN_OBJECT_AREA,
     RUN_FULL_CSV_EXPORT,
     RUN_LIVE_PREVIEW,
-    TRACK_TRAIL_LENGTH,
     USE_WATERSHED_SPLIT,
+    VIDEO_PLAYBACK_DELAY_MS,
     WATERSHED_MIN_DISTANCE,
 )
 from configs.paths import PROCESSED_DIR, RAW_VIDEO_DIR
@@ -44,7 +46,7 @@ def find_first_video(raw_video_dir: Path) -> Path:
     for pattern in supported_extensions:
         candidates = sorted(raw_video_dir.glob(pattern))
         if candidates:
-            return candidates[-1]
+            return candidates[0]
     raise FileNotFoundError(f"No supported video file found in {raw_video_dir}")
 
 
@@ -72,8 +74,6 @@ def update_track_history(tracked_features: pd.DataFrame, track_history: dict[int
         centroid = (int(row[x_col]), int(row[y_col]))
         history = track_history.setdefault(track_id, [])
         history.append(centroid)
-        if len(history) > TRACK_TRAIL_LENGTH:
-            history.pop(0)
 
 
 def draw_left_panel(frame_bgr: np.ndarray, tracked_features: pd.DataFrame, track_history: dict[int, list[tuple[int, int]]]) -> np.ndarray:
@@ -210,12 +210,14 @@ def main() -> None:
     detector_config = ConnectedComponentDetectionConfig(
         min_object_area=MIN_OBJECT_AREA,
         crop_bottom_px=CROP_BOTTOM_PX,
-        background_qold=BACKGROUND_THRESHOLD,
+        background_threshold=BACKGROUND_THRESHOLD,
         background_method=BACKGROUND_METHOD,
         background_percentile=BACKGROUND_PERCENTILE,
         fill_holes=FILL_HOLES,
         use_watershed_split=USE_WATERSHED_SPLIT,
         watershed_min_distance=WATERSHED_MIN_DISTANCE,
+        fallback_watershed_min_distance=FALLBACK_WATERSHED_MIN_DISTANCE,
+        merged_area_ratio=MERGED_AREA_RATIO,
         max_split_objects = MAX_SPLIT_OBJECTS,
     )
 
@@ -234,10 +236,13 @@ def main() -> None:
         raise RuntimeError(f"Unable to open video: {video_path}")
 
     paused = False
+    step_frame = False
     frame_id = 0
 
+    print("Controls: space=toggle pause/play, n=next frame when paused, q=quit")
+
     while True:
-        if not paused:
+        if not paused or step_frame:
             success, frame = capture.read()
             if not success:
                 break
@@ -258,12 +263,16 @@ def main() -> None:
             )
             cv2.imshow("Droplet Live Preview", preview)
             frame_id += 1
+            step_frame = False
 
-        key = cv2.waitKey(1) & 0xFF
+        delay = VIDEO_PLAYBACK_DELAY_MS if not paused else 0
+        key = cv2.waitKey(delay) & 0xFF
         if key == ord("q"):
             break
         if key == ord(" "):
             paused = not paused
+        if key == ord("n") and paused:
+            step_frame = True
 
     capture.release()
     cv2.destroyAllWindows()

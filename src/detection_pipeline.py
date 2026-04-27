@@ -23,17 +23,17 @@ class FrameExtractionConfig:
 class ConnectedComponentDetectionConfig:
     min_area_ratio: float = 0.8
     max_area_ratio: float = 1.2
-    min_object_area: int = 10
+    min_object_area: int = 20
     crop_bottom_px: int = 0
     background_threshold: int = 0
     background_method: str = "median"
     background_percentile: int = 50
     fill_holes: bool = True
     use_watershed_split: bool = False
-    watershed_min_distance: int = 5
-    fallback_watershed_min_distance: int = 3
-    merged_area_ratio: float = 1.4
-    max_split_objects: int = 4
+    watershed_min_distance: int = 8
+    fallback_watershed_min_distance: int = 2
+    merged_area_ratio: float = 1.3
+    max_split_objects: int = 2
 
 
 @dataclass
@@ -173,7 +173,7 @@ class ConnectedComponentDropletDetector:
         binary_bool = binary > 0
         filled_bool = binary_bool
         if self.config.fill_holes:
-            filled_bool = binary_fill_holes(binary_bool)
+            filled_bool = self._fill_holes_with_temporary_border(binary_bool)
 
         cleaned_bool = self._remove_small_objects(filled_bool, self.config.min_object_area)
         if self.config.use_watershed_split:
@@ -208,6 +208,23 @@ class ConnectedComponentDropletDetector:
             if region.area >= min_area:
                 cleaned[labeled == region.label] = True
         return cleaned
+
+    def _fill_holes_with_temporary_border(self, mask_bool: np.ndarray) -> np.ndarray:
+        if mask_bool.size == 0:
+            return mask_bool
+
+        top_row = mask_bool[0].copy()
+        bottom_row = mask_bool[-1].copy()
+
+        augmented_mask = mask_bool.copy()
+        augmented_mask[0, :] = True
+        augmented_mask[-1, :] = True
+
+        filled = binary_fill_holes(augmented_mask)
+
+        filled[0, :] = top_row
+        filled[-1, :] = bottom_row
+        return filled
 
     def _segment_with_watershed(self, mask_bool: np.ndarray) -> np.ndarray:
         if not np.any(mask_bool):
