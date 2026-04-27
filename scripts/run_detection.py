@@ -19,6 +19,7 @@ from configs.constants import (
     EXPERIMENT_NAME,
     FALLBACK_WATERSHED_MIN_DISTANCE,
     FILL_HOLES,
+    MAX_ANALYZED_FRAMES,
     MAX_BACKGROUND_FRAMES,
     MAX_ASSIGNMENT_DISTANCE,
     MAX_MISSED,
@@ -28,6 +29,7 @@ from configs.constants import (
     RUN_FULL_CSV_EXPORT,
     RUN_LIVE_PREVIEW,
     USE_WATERSHED_SPLIT,
+    VIDEO_FILE_NAME,
     VIDEO_PLAYBACK_DELAY_MS,
     WATERSHED_MIN_DISTANCE,
 )
@@ -41,12 +43,28 @@ from src.detection_pipeline import (
 from src.tracking import DropletTracker
 
 
-def find_first_video(raw_video_dir: Path) -> Path:
-    supported_extensions = ["*.mp4", "*.avi", "*.mov", "*.mkv"]
-    for pattern in supported_extensions:
-        candidates = sorted(raw_video_dir.glob(pattern))
-        if candidates:
-            return candidates[0]
+def find_video(raw_video_dir: Path, video_file_name: str | None = None) -> Path:
+    supported_extensions = ["mp4", "avi", "mov", "mkv"]
+
+    if video_file_name:
+        candidate = raw_video_dir / video_file_name
+        if candidate.exists():
+            return candidate
+
+        root = raw_video_dir / Path(video_file_name).stem
+        for extension in supported_extensions:
+            candidate_with_ext = root.with_suffix(f".{extension}")
+            if candidate_with_ext.exists():
+                return candidate_with_ext
+
+        raise FileNotFoundError(
+            f"Unable to find video '{video_file_name}' in {raw_video_dir}."
+        )
+
+    for extension in supported_extensions:
+        for candidate in sorted(raw_video_dir.glob(f"*.{extension}")):
+            return candidate
+
     raise FileNotFoundError(f"No supported video file found in {raw_video_dir}")
 
 
@@ -197,12 +215,13 @@ def main() -> None:
     if not RAW_VIDEO_DIR.exists():
         raise FileNotFoundError(f"RAW_VIDEO_DIR does not exist: {RAW_VIDEO_DIR}")
 
-    experiment_name = EXPERIMENT_NAME or "debug_experiment"
+    video_path = find_video(RAW_VIDEO_DIR, VIDEO_FILE_NAME)
+    print(f"Using video: {video_path.name}")
+    print("Background is being calculated...")
+
+    experiment_name = EXPERIMENT_NAME or video_path.stem
     output_dir = PROCESSED_DIR / experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
-
-    video_path = find_first_video(RAW_VIDEO_DIR)
-    print("Background is being calculated...")
     background_gray = build_background_model(video_path)
     background_preview = cv2.cvtColor(background_gray, cv2.COLOR_GRAY2BGR)
     cv2.imshow("Background Model", background_preview)
@@ -264,6 +283,10 @@ def main() -> None:
             cv2.imshow("Droplet Live Preview", preview)
             frame_id += 1
             step_frame = False
+
+            if MAX_ANALYZED_FRAMES is not None and frame_id >= MAX_ANALYZED_FRAMES:
+                print(f"Reached max analyzed frames: {MAX_ANALYZED_FRAMES}")
+                break
 
         delay = VIDEO_PLAYBACK_DELAY_MS if not paused else 0
         key = cv2.waitKey(delay) & 0xFF
