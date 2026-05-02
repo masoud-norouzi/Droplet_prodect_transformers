@@ -223,8 +223,9 @@ def main() -> None:
     output_dir = PROCESSED_DIR / experiment_name
     output_dir.mkdir(parents=True, exist_ok=True)
     background_gray = build_background_model(video_path)
-    background_preview = cv2.cvtColor(background_gray, cv2.COLOR_GRAY2BGR)
-    cv2.imshow("Background Model", background_preview)
+    if RUN_LIVE_PREVIEW:
+        background_preview = cv2.cvtColor(background_gray, cv2.COLOR_GRAY2BGR)
+        cv2.imshow("Background Model", background_preview)
 
     detector_config = ConnectedComponentDetectionConfig(
         min_object_area=MIN_OBJECT_AREA,
@@ -254,6 +255,8 @@ def main() -> None:
     if not capture.isOpened():
         raise RuntimeError(f"Unable to open video: {video_path}")
 
+    total_frames = int(capture.get(cv2.CAP_PROP_FRAME_COUNT))
+    analyzed_frames = MAX_ANALYZED_FRAMES if MAX_ANALYZED_FRAMES is not None else None
     paused = False
     step_frame = False
     frame_id = 0
@@ -273,16 +276,28 @@ def main() -> None:
                 raw_frames.append(result.features)
                 tracked_frames.append(tracked)
 
-            preview = make_preview_frame(
-                original_frame=frame,
-                cropped_frame=result.cropped_frame,
-                processed_image=result.filled_image,
-                tracked_features=tracked,
-                track_history=track_history,
-            )
-            cv2.imshow("Droplet Live Preview", preview)
+            if RUN_LIVE_PREVIEW:
+                preview = make_preview_frame(
+                    original_frame=frame,
+                    cropped_frame=result.cropped_frame,
+                    processed_image=result.filled_image,
+                    tracked_features=tracked,
+                    track_history=track_history,
+                )
+                cv2.imshow("Droplet Live Preview", preview)
+
             frame_id += 1
             step_frame = False
+
+            if frame_id % 1000 == 0:
+                if analyzed_frames is not None:
+                    remaining = max(analyzed_frames - frame_id, 0)
+                    print(f"Processed {frame_id} frames; {remaining} frames remain (limit).")
+                elif total_frames > 0:
+                    remaining = max(total_frames - frame_id, 0)
+                    print(f"Processed {frame_id} frames; {remaining} frames remain.")
+                else:
+                    print(f"Processed {frame_id} frames.")
 
             if MAX_ANALYZED_FRAMES is not None and frame_id >= MAX_ANALYZED_FRAMES:
                 print(f"Reached max analyzed frames: {MAX_ANALYZED_FRAMES}")
