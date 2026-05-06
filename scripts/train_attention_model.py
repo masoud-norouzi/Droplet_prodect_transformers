@@ -181,16 +181,41 @@ def main() -> None:
     model = TrajectoryAttentionModel().to(device)
     optimizer = torch.optim.Adam(model.parameters(), lr=1e-3)
 
-    epochs = 20
+    epochs = 60
+    best_val_loss = float("inf")
+    best_epoch = 0
+    patience = 10
+    epochs_no_improve = 0
+    best_model_path = output_dir / "attention_model.pt"
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+
     for epoch in range(1, epochs + 1):
         train_loss = train_epoch(model, train_loader, optimizer, device)
         val_loss = eval_epoch(model, val_loader, device)
-        print(f"Epoch {epoch:02d} | train_loss={train_loss:.6f} | val_loss={val_loss:.6f}")
+        improved = val_loss < best_val_loss
 
-    output_dir.mkdir(parents=True, exist_ok=True)
-    model_path = output_dir / "attention_model.pt"
-    torch.save(model.state_dict(), model_path)
-    print(f"Saved model to: {model_path}")
+        if improved:
+            best_val_loss = val_loss
+            best_epoch = epoch
+            epochs_no_improve = 0
+            torch.save(model.state_dict(), best_model_path)
+        else:
+            epochs_no_improve += 1
+
+        print(
+            f"Epoch {epoch:02d} | train_loss={train_loss:.6f} | val_loss={val_loss:.6f}"
+            + (" | best" if improved else "")
+        )
+
+        if epochs_no_improve >= patience:
+            print(
+                f"Early stopping after {epoch:02d} epochs (patience={patience})."
+            )
+            break
+
+    print(f"Best epoch: {best_epoch:02d} | best val_loss={best_val_loss:.6f}")
+    print(f"Saved best model to: {best_model_path}")
 
 
 if __name__ == "__main__":
