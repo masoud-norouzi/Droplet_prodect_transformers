@@ -18,14 +18,18 @@ T_HISTORY = 20
 T_FUTURE = 10
 N_MAX = 16
 STRIDE = 5
-NUMERIC_FEATURES = ["x", "y", "vx", "vy", "s_coord", "d_centerline"]
+
+NUMERIC_FEATURES = ["s_coord", "d_centerline", "v_s"]
 FEATURE_COLUMNS = NUMERIC_FEATURES + ["channel_id_int"]
-TARGET_COLUMNS = ["vx", "vy"]
+TARGET_COLUMNS = ["v_s"]
+DIAGNOSTIC_VELOCITY_COLUMNS = ["v_s", "v_d"]
 
 
 def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="Build trajectory windows for attention-model training."
+        description=(
+            "Build geometry-native trajectory windows with centerline velocity targets."
+        )
     )
     parser.add_argument(
         "--experiment-name",
@@ -44,6 +48,15 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
             "instead of outputs/processed/<experiment_name>/trajectories_geometry.csv."
         ),
     )
+    parser.add_argument(
+        "--output-file",
+        type=Path,
+        default=None,
+        help=(
+            "Optional output NPZ path. If omitted, saves "
+            "trajectory_windows_geometry_velocity.npz next to the input trajectories."
+        ),
+    )
     return parser.parse_args(args)
 
 
@@ -55,10 +68,6 @@ def load_trajectories(path: Path) -> pd.DataFrame:
     required_columns = {
         "frame",
         "track_id",
-        "x",
-        "y",
-        "vx",
-        "vy",
         "s_coord",
         "d_centerline",
         "channel_id",
@@ -67,6 +76,52 @@ def load_trajectories(path: Path) -> pd.DataFrame:
     if missing:
         raise KeyError(f"Missing required columns: {sorted(missing)}")
 
+    return df
+
+
+def add_centerline_velocities(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df["frame"] = df["frame"].astype(int)
+    df["track_id"] = df["track_id"].astype(int)
+    df.sort_values(["track_id", "frame"], inplace=True)
+
+    df["v_s"] = 0.0
+    df["v_d"] = 0.0
+
+    for _, track_df in df.groupby("track_id", sort=False):
+        track_index = track_df.index
+        if len(track_index) == 1:
+            df.loc[track_index[0], ["v_s", "v_d"]] = 0.0
+            continue
+
+        frame_diff = np.diff(track_df["frame"].to_numpy(dtype=np.float32))
+        valid_diff = np.isfinite(frame_diff) & (frame_diff != 0.0)
+
+        v_s_tail = np.zeros(len(track_index) - 1, dtype=np.float32)
+        v_d_tail = np.zeros(len(track_index) - 1, dtype=np.float32)
+        v_s_tail[valid_diff] = (
+            np.diff(track_df["s_coord"].to_numpy(dtype=np.float32))[valid_diff]
+            / frame_diff[valid_diff]
+        )
+        v_d_tail[valid_diff] = (
+            np.diff(track_df["d_centerline"].to_numpy(dtype=np.float32))[valid_diff]
+            / frame_diff[valid_diff]
+        )
+
+        v_s = np.zeros(len(track_index), dtype=np.float32)
+        v_d = np.zeros(len(track_index), dtype=np.float32)
+        v_s[1:] = v_s_tail
+        v_d[1:] = v_d_tail
+
+        first_valid = np.flatnonzero(valid_diff)
+        if len(first_valid) > 0:
+            v_s[0] = v_s_tail[first_valid[0]]
+            v_d[0] = v_d_tail[first_valid[0]]
+
+        df.loc[track_index, "v_s"] = v_s
+        df.loc[track_index, "v_d"] = v_d
+
+    df[["v_s", "v_d"]] = df[["v_s", "v_d"]].replace([np.inf, -np.inf], 0.0).fillna(0.0)
     return df
 
 
@@ -82,13 +137,51 @@ def encode_channels(df: pd.DataFrame) -> tuple[pd.DataFrame, np.ndarray, np.ndar
     return df, channel_names, channel_ids
 
 
+def normalize_numeric_features(
+    df: pd.DataFrame,
+) -> tuple[pd.DataFrame, np.ndarray, np.ndarray]:
+    df = df.copy()
+    feature_mean = df[NUMERIC_FEATURES].mean().to_numpy(dtype=np.float32)
+    feature_std = df[NUMERIC_FEATURES].std(ddof=0).to_numpy(dtype=np.float32)
+    feature_std = np.where(feature_std == 0.0, 1.0, feature_std).astype(np.float32)
+    df.loc[:, NUMERIC_FEATURES] = (
+        df[NUMERIC_FEATURES].to_numpy(dtype=np.float32) - feature_mean
+    ) / feature_std
+    return df, feature_mean, feature_std
+
+
+def compute_target_stats(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
+    target_mean = df[TARGET_COLUMNS].mean().to_numpy(dtype=np.float32)
+    target_std = df[TARGET_COLUMNS].std(ddof=0).to_numpy(dtype=np.float32)
+    target_std = np.where(target_std == 0.0, 1.0, target_std).astype(np.float32)
+    return target_mean, target_std
+
+
 def build_windows(
     df: pd.DataFrame,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-    df = df.copy()
-    df["frame"] = df["frame"].astype(int)
-    df["track_id"] = df["track_id"].astype(int)
+) -> tuple[
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    np.ndarray,
+    pd.DataFrame,
+]:
+    df = add_centerline_velocities(df)
+    raw_feature_df = df.copy()
+    target_mean, target_std = compute_target_stats(raw_feature_df)
     df, channel_names, channel_ids = encode_channels(df)
+    df, feature_mean, feature_std = normalize_numeric_features(df)
+    df.loc[:, TARGET_COLUMNS] = (
+        raw_feature_df[TARGET_COLUMNS].to_numpy(dtype=np.float32) - target_mean
+    ) / target_std
 
     min_frame = int(df["frame"].min())
     max_frame = int(df["frame"].max())
@@ -117,7 +210,6 @@ def build_windows(
 
     for start_frame in sample_starts:
         last_input_frame = start_frame + T_HISTORY - 1
-        future_frame_end = start_frame + T_HISTORY + T_FUTURE - 1
 
         tokens = df.loc[df["frame"] == last_input_frame, "track_id"].sort_values().unique()
         tokens = tokens[:N_MAX]
@@ -177,11 +269,25 @@ def build_windows(
     track_ids = np.stack(track_ids_list, axis=0)
     start_frames_arr = np.array(start_frames, dtype=int)
 
-    return X, Y, input_mask, target_mask, track_ids, start_frames_arr, channel_names, channel_ids
+    return (
+        X,
+        Y,
+        input_mask,
+        target_mask,
+        track_ids,
+        start_frames_arr,
+        channel_names,
+        channel_ids,
+        feature_mean,
+        feature_std,
+        target_mean,
+        target_std,
+        raw_feature_df,
+    )
 
 
 def save_windows(
-    output_dir: Path,
+    output_path: Path,
     X: np.ndarray,
     Y: np.ndarray,
     input_mask: np.ndarray,
@@ -190,9 +296,12 @@ def save_windows(
     start_frames: np.ndarray,
     channel_names: np.ndarray,
     channel_ids: np.ndarray,
+    feature_mean: np.ndarray,
+    feature_std: np.ndarray,
+    target_mean: np.ndarray,
+    target_std: np.ndarray,
 ) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    output_path = output_dir / "trajectory_windows.npz"
+    output_path.parent.mkdir(parents=True, exist_ok=True)
     np.savez_compressed(
         output_path,
         X=X,
@@ -201,31 +310,59 @@ def save_windows(
         target_mask=target_mask,
         track_ids=track_ids,
         start_frames=start_frames,
+        feature_columns=np.array(FEATURE_COLUMNS, dtype=str),
+        numeric_features=np.array(NUMERIC_FEATURES, dtype=str),
+        target_columns=np.array(TARGET_COLUMNS, dtype=str),
         feature_names=np.array(FEATURE_COLUMNS, dtype=str),
         numeric_feature_names=np.array(NUMERIC_FEATURES, dtype=str),
         target_names=np.array(TARGET_COLUMNS, dtype=str),
+        numeric_feature_mean=feature_mean,
+        numeric_feature_std=feature_std,
+        target_mean=target_mean,
+        target_std=target_std,
         channel_names=channel_names,
         channel_ids=channel_ids,
-        target_type="velocity",
+        target_type="geometry_velocity_vs_only",
     )
     return output_path
 
 
-def print_summary(X: np.ndarray, Y: np.ndarray, target_mask: np.ndarray, track_ids: np.ndarray) -> None:
+def print_summary(
+    X: np.ndarray,
+    Y: np.ndarray,
+    target_mask: np.ndarray,
+    raw_feature_df: pd.DataFrame,
+) -> None:
     num_samples = X.shape[0]
+    valid_future_targets = float(target_mask.sum()) / (num_samples * T_FUTURE * N_MAX)
 
-    valid_droplets = np.sum(track_ids != -1, axis=1)
-    avg_valid_droplets = float(valid_droplets.mean())
-
-    total_future_values = target_mask.sum()
-    valid_future_targets = float(total_future_values) / (num_samples * T_FUTURE * N_MAX)
-
-    print("=== trajectory window summary ===")
-    print(f"Number of samples: {num_samples}")
+    print("=== geometry velocity window summary ===")
     print(f"X shape: {X.shape}")
     print(f"Y shape: {Y.shape}")
-    print(f"Average valid droplets per sample: {avg_valid_droplets:.2f}")
-    print(f"Fraction of valid future targets: {valid_future_targets:.4f}")
+    print(f"Feature order: {FEATURE_COLUMNS}")
+    print(f"Numeric features: {NUMERIC_FEATURES}")
+    print(f"Target columns: {TARGET_COLUMNS}")
+    print("\nRaw centerline velocity diagnostics:")
+    for column in DIAGNOSTIC_VELOCITY_COLUMNS:
+        values = raw_feature_df[column]
+        print(f"  {column}:")
+        print(f"    mean: {values.mean():.6f}")
+        print(f"    std: {values.std(ddof=0):.6f}")
+        print(f"    min: {values.min():.6f}")
+        print(f"    max: {values.max():.6f}")
+    print(f"\nModel target columns: {TARGET_COLUMNS} (v_d is diagnostic only)")
+    print("\nNormalized Y statistics over valid targets:")
+    valid_y = Y[target_mask]
+    for target_index, column in enumerate(TARGET_COLUMNS):
+        values = valid_y[:, target_index] if len(valid_y) else np.array([], dtype=np.float32)
+        print(f"  {column}:")
+        if len(values):
+            print(f"    mean: {values.mean():.6f}")
+            print(f"    std: {values.std(ddof=0):.6f}")
+        else:
+            print("    mean: nan")
+            print("    std: nan")
+    print(f"\nFraction of valid future targets: {valid_future_targets:.4f}")
     print("=== end summary ===")
 
 
@@ -243,6 +380,12 @@ def main() -> None:
         output_dir = PROCESSED_DIR / args.experiment_name
         trajectory_csv = output_dir / "trajectories_geometry.csv"
 
+    output_path = (
+        args.output_file
+        if args.output_file is not None
+        else output_dir / "trajectory_windows_geometry_velocity.npz"
+    )
+
     df = load_trajectories(trajectory_csv)
     (
         X,
@@ -253,9 +396,15 @@ def main() -> None:
         start_frames,
         channel_names,
         channel_ids,
+        feature_mean,
+        feature_std,
+        target_mean,
+        target_std,
+        raw_feature_df,
     ) = build_windows(df)
-    output_path = save_windows(
-        output_dir,
+
+    save_windows(
+        output_path,
         X,
         Y,
         input_mask,
@@ -264,12 +413,17 @@ def main() -> None:
         start_frames,
         channel_names,
         channel_ids,
+        feature_mean,
+        feature_std,
+        target_mean,
+        target_std,
     )
-    print_summary(X, Y, target_mask, track_ids)
+
+    print_summary(X, Y, target_mask, raw_feature_df)
     print("\nChannel mapping:")
     for channel_name, channel_id in zip(channel_names, channel_ids):
         print(f"  {int(channel_id)}: {channel_name}")
-    print(f"\nSaved window dataset: {output_path}")
+    print(f"\nSaved geometry velocity window dataset: {output_path}")
 
 
 if __name__ == "__main__":
