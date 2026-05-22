@@ -45,6 +45,16 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
     parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument(
+        "--use-recurrent",
+        choices=["true", "false"],
+        default="false",
+        help="Enable GRUCell droplet memory after per-timestep interaction encoding.",
+    )
+    parser.add_argument("--hidden-dim", type=int, default=64)
+    parser.add_argument("--num-layers", type=int, default=2)
+    parser.add_argument("--nhead", type=int, default=4)
+    parser.add_argument("--dropout", type=float, default=0.1)
     return parser.parse_args(args)
 
 
@@ -80,8 +90,9 @@ class RecurrentGeometryModel(nn.Module):
         self,
         numeric_input_dim: int,
         num_channel_embeddings: int,
+        use_recurrent: bool = False,
         channel_embedding_dim: int = 16,
-        hidden_dim: int = 96,
+        hidden_dim: int = 64,
         num_heads: int = 4,
         num_layers: int = 2,
         dropout: float = 0.1,
@@ -89,9 +100,11 @@ class RecurrentGeometryModel(nn.Module):
         super().__init__()
         self.numeric_input_dim = numeric_input_dim
         self.num_channel_embeddings = num_channel_embeddings
+        self.use_recurrent = use_recurrent
+        self.hidden_dim = hidden_dim
 
         self.channel_embed = nn.Embedding(num_channel_embeddings, channel_embedding_dim)
-        self.input_mlp = nn.Sequential(
+        self.state_encoder = nn.Sequential(
             nn.Linear(numeric_input_dim + channel_embedding_dim, hidden_dim),
             nn.ReLU(inplace=True),
             nn.Dropout(dropout),
@@ -106,6 +119,7 @@ class RecurrentGeometryModel(nn.Module):
             batch_first=True,
         )
         self.transformer = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
+        self.gru_cell = nn.GRUCell(hidden_dim, hidden_dim)
         self.velocity_head = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim),
             nn.ReLU(inplace=True),
@@ -122,7 +136,31 @@ class RecurrentGeometryModel(nn.Module):
         channel_ids = channel_ids.clamp(min=0, max=self.num_channel_embeddings - 1)
 
         channel_embedding = self.channel_embed(channel_ids)
-        hidden = self.input_mlp(torch.cat([numeric, channel_embedding], dim=-1))
+        hidden = self.state_encoder(torch.cat([numeric, channel_embedding], dim=-1))
+
+        if self.use_recurrent:
+            h = torch.zeros(
+                batch_size,
+                n_max,
+                self.hidden_dim,
+                dtype=hidden.dtype,
+                device=hidden.device,
+            )
+            predictions: list[torch.Tensor] = []
+            for step in range(time_steps - 1):
+                step_padding_mask = ~mask[:, step]
+                context = self.transformer(
+                    hidden[:, step], src_key_padding_mask=step_padding_mask
+                )
+                h_candidate = self.gru_cell(
+                    context.reshape(batch_size * n_max, self.hidden_dim),
+                    h.reshape(batch_size * n_max, self.hidden_dim),
+                ).reshape(batch_size, n_max, self.hidden_dim)
+                valid = mask[:, step].unsqueeze(-1)
+                h = torch.where(valid, h_candidate, h)
+                predictions.append(self.velocity_head(h))
+            return torch.stack(predictions, dim=1)
+
         hidden = hidden.reshape(batch_size * time_steps, n_max, -1)
 
         padding_mask = ~mask.reshape(batch_size * time_steps, n_max)
@@ -278,6 +316,7 @@ def checkpoint_payload(
 
 def main() -> None:
     args = parse_args()
+    use_recurrent = args.use_recurrent.lower() == "true"
     output_dir = PROCESSED_DIR / args.experiment_name
     windows_path = (
         args.windows_file
@@ -299,13 +338,14 @@ def main() -> None:
 
     config = {
         "model_type": "recurrent_geometry_one_step",
+        "use_recurrent": use_recurrent,
         "numeric_input_dim": int(len(windows["numeric_features"])),
         "num_channel_embeddings": int(windows["channel_ids"].max()) + 1,
         "channel_embedding_dim": 16,
-        "hidden_dim": 96,
-        "num_heads": 4,
-        "num_layers": 2,
-        "dropout": 0.1,
+        "hidden_dim": args.hidden_dim,
+        "num_heads": args.nhead,
+        "num_layers": args.num_layers,
+        "dropout": args.dropout,
         "batch_size": args.batch_size,
         "learning_rate": args.learning_rate,
         "epochs": args.epochs,
@@ -316,9 +356,16 @@ def main() -> None:
     }
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    log(f"torch version: {torch.__version__}")
+    log(f"cuda available: {torch.cuda.is_available()}")
+    log(f"cuda version: {torch.version.cuda}")
+    if torch.cuda.is_available():
+        log(f"cuda device: {torch.cuda.get_device_name(0)}")
+
     model = RecurrentGeometryModel(
         numeric_input_dim=config["numeric_input_dim"],
         num_channel_embeddings=config["num_channel_embeddings"],
+        use_recurrent=config["use_recurrent"],
         channel_embedding_dim=config["channel_embedding_dim"],
         hidden_dim=config["hidden_dim"],
         num_heads=config["num_heads"],
@@ -327,7 +374,11 @@ def main() -> None:
     ).to(device)
     optimizer = torch.optim.AdamW(model.parameters(), lr=args.learning_rate)
 
-    best_model_path = output_dir / "recurrent_geometry_model_best.pt"
+    best_model_path = output_dir / (
+        "recurrent_geometry_model_gru_best.pt"
+        if use_recurrent
+        else "recurrent_geometry_model_best.pt"
+    )
     best_val_loss = float("inf")
     best_epoch = 0
     epochs_no_improve = 0
@@ -341,6 +392,11 @@ def main() -> None:
     log(f"Numeric features: {list(windows['numeric_features'])}")
     log(f"Target columns: {list(windows['target_columns'])}")
     log(f"Channel embeddings: {len(windows['channel_names'])}")
+    log(f"Recurrent mode enabled: {use_recurrent}")
+    log(f"Hidden dimension: {args.hidden_dim}")
+    log(f"Transformer layers: {args.num_layers}")
+    log(f"Transformer heads: {args.nhead}")
+    log(f"Dropout: {args.dropout}")
     log(
         f"Training for up to {args.epochs} epochs with "
         f"early stopping patience={args.patience}."
