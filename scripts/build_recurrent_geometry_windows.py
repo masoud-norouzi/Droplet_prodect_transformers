@@ -158,6 +158,7 @@ def build_windows(
     np.ndarray,
     np.ndarray,
     pd.DataFrame,
+    dict[str, int],
 ]:
     df = add_centerline_velocity(df)
     raw_df = df.copy()
@@ -191,14 +192,25 @@ def build_windows(
     target_masks: list[np.ndarray] = []
     start_frames: list[int] = []
     track_ids_list: list[np.ndarray] = []
+    exit_slot_count = 0
+    ignored_entering_droplet_count = 0
 
     for start_frame in sample_starts:
-        last_history_frame = start_frame + T_HISTORY - 1
         tokens = (
-            feature_df.loc[feature_df["frame"] == last_history_frame, "track_id"]
+            feature_df.loc[feature_df["frame"] == start_frame, "track_id"]
             .sort_values()
             .unique()
         )
+        window_end_frame = start_frame + T_TOTAL - 1
+        window_df = feature_df.loc[
+            (feature_df["frame"] >= start_frame)
+            & (feature_df["frame"] <= window_end_frame)
+        ]
+        entering_track_ids = set(window_df["track_id"].astype(int).unique()) - set(
+            tokens.astype(int)
+        )
+        ignored_entering_droplet_count += len(entering_track_ids)
+
         tokens = tokens[:N_MAX]
         num_tokens = len(tokens)
 
@@ -238,6 +250,9 @@ def build_windows(
             ]
             target_mask[valid_targets, token_index] = True
 
+            if valid_frames[0] and not valid_frames[-1]:
+                exit_slot_count += 1
+
         z_windows.append(z_window)
         masks.append(mask)
         target_windows.append(target_v_s)
@@ -259,6 +274,10 @@ def build_windows(
         target_mean,
         target_std,
         raw_df,
+        {
+            "exit_slot_count": exit_slot_count,
+            "ignored_entering_droplet_count": ignored_entering_droplet_count,
+        },
     )
 
 
@@ -285,6 +304,7 @@ def save_windows(
         target_v_s=target_v_s,
         target_mask=target_mask,
         track_ids=track_ids,
+        slot_track_ids=track_ids,
         start_frames=start_frames,
         feature_columns=np.array(FEATURE_COLUMNS, dtype=str),
         numeric_features=np.array(NUMERIC_FEATURES, dtype=str),
@@ -310,7 +330,9 @@ def print_summary(
     mask: np.ndarray,
     target_v_s: np.ndarray,
     target_mask: np.ndarray,
+    track_ids: np.ndarray,
     raw_df: pd.DataFrame,
+    diagnostics: dict[str, int],
 ) -> None:
     valid_targets = target_v_s[target_mask]
     print("=== recurrent geometry window summary ===")
@@ -318,6 +340,18 @@ def print_summary(
     print(f"target_v_s shape: {target_v_s.shape}")
     print(f"mask fraction: {mask.mean():.4f}")
     print(f"target valid fraction: {target_mask.mean():.4f}")
+    print(f"Slots that become invalid due to exiting droplets: {diagnostics['exit_slot_count']}")
+    print(
+        "New droplets ignored because they enter after window start: "
+        f"{diagnostics['ignored_entering_droplet_count']}"
+    )
+    slot_changes = 0
+    for window_track_ids in track_ids:
+        assigned = window_track_ids[window_track_ids >= 0]
+        if len(assigned) != len(np.unique(assigned)):
+            slot_changes += 1
+    assert slot_changes == 0, "Duplicate track_id assignment within a window detected."
+    print("Slot track-id consistency check: passed (one persistent track_id per slot)")
     print(f"Feature order: {FEATURE_COLUMNS}")
     print(f"Numeric features: {NUMERIC_FEATURES}")
     print(f"Target columns: {TARGET_COLUMNS}")
@@ -367,6 +401,7 @@ def main() -> None:
         target_mean,
         target_std,
         raw_df,
+        diagnostics,
     ) = build_windows(df)
 
     save_windows(
@@ -384,7 +419,7 @@ def main() -> None:
         target_mean,
         target_std,
     )
-    print_summary(Z, mask, target_v_s, target_mask, raw_df)
+    print_summary(Z, mask, target_v_s, target_mask, track_ids, raw_df, diagnostics)
     print("\nChannel mapping:")
     for channel_name, channel_id in zip(channel_names, channel_ids):
         print(f"  {int(channel_id)}: {channel_name}")

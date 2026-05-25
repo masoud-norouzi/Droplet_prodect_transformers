@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -37,10 +38,10 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
         default=None,
         help=(
             "Optional recurrent geometry NPZ. Defaults to "
-            "outputs/processed/<experiment_name>/trajectory_windows_recurrent_geometry.npz."
+            "outputs/processed/<experiment_name>/recurrent_geometry_windows.npz."
         ),
     )
-    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=60)
     parser.add_argument("--patience", type=int, default=10)
     parser.add_argument("--learning-rate", type=float, default=1e-3)
@@ -48,13 +49,16 @@ def parse_args(args: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--use-recurrent",
         choices=["true", "false"],
-        default="false",
+        default="true",
         help="Enable GRUCell droplet memory after per-timestep interaction encoding.",
     )
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--num-layers", type=int, default=2)
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--num-threads", type=int, default=8)
+    parser.add_argument("--num-inter-op-threads", type=int, default=1)
+    parser.add_argument("--num-workers", type=int, default=0)
     return parser.parse_args(args)
 
 
@@ -244,6 +248,7 @@ def train_epoch(
     epoch: int,
     log_every: int = 25,
 ) -> float:
+    epoch_start = time.perf_counter()
     model.train()
     total_loss = 0.0
     count = 0
@@ -263,9 +268,12 @@ def train_epoch(
         total_loss += loss.item() * Z.size(0)
         count += Z.size(0)
         if batch_index == 1 or batch_index % log_every == 0 or batch_index == len(loader):
+            elapsed = time.perf_counter() - epoch_start
+            sec_per_batch = elapsed / max(batch_index, 1)
             log(
                 f"Epoch {epoch:02d} train batch {batch_index}/{len(loader)} "
-                f"| running_loss={total_loss / max(count, 1):.6f}"
+                f"| running_loss={total_loss / max(count, 1):.6f} "
+                f"| {sec_per_batch:.3f} sec/batch"
             )
 
     return total_loss / max(count, 1)
@@ -321,8 +329,11 @@ def main() -> None:
     windows_path = (
         args.windows_file
         if args.windows_file is not None
-        else output_dir / "trajectory_windows_recurrent_geometry.npz"
+        else output_dir / "recurrent_geometry_windows.npz"
     )
+
+    torch.set_num_threads(args.num_threads)
+    torch.set_num_interop_threads(args.num_inter_op_threads)
 
     windows = load_windows(windows_path)
     Z = windows["Z"]
@@ -330,11 +341,15 @@ def main() -> None:
     target_v_s = windows["target_v_s"]
     target_mask = windows["target_mask"]
 
-    train_ds, val_ds = split_dataset(
-        Z, mask, target_v_s, target_mask, seed=args.seed
-    )
-    train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(val_ds, batch_size=args.batch_size, shuffle=False)
+    train_ds, val_ds = split_dataset(Z, mask, target_v_s, target_mask, seed=args.seed)
+    loader_kwargs = {
+        "batch_size": args.batch_size,
+        "num_workers": args.num_workers,
+        "pin_memory": False,
+        "persistent_workers": False,
+    }
+    train_loader = DataLoader(train_ds, shuffle=True, **loader_kwargs)
+    val_loader = DataLoader(val_ds, shuffle=False, **loader_kwargs)
 
     config = {
         "model_type": "recurrent_geometry_one_step",
@@ -347,6 +362,9 @@ def main() -> None:
         "num_layers": args.num_layers,
         "dropout": args.dropout,
         "batch_size": args.batch_size,
+        "num_threads": args.num_threads,
+        "num_inter_op_threads": args.num_inter_op_threads,
+        "num_workers": args.num_workers,
         "learning_rate": args.learning_rate,
         "epochs": args.epochs,
         "patience": args.patience,
@@ -355,12 +373,10 @@ def main() -> None:
         "target_shape": tuple(int(value) for value in target_v_s.shape),
     }
 
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cpu")
     log(f"torch version: {torch.__version__}")
-    log(f"cuda available: {torch.cuda.is_available()}")
-    log(f"cuda version: {torch.version.cuda}")
-    if torch.cuda.is_available():
-        log(f"cuda device: {torch.cuda.get_device_name(0)}")
+    log(f"torch num threads: {torch.get_num_threads()}")
+    log(f"torch inter-op threads: {torch.get_num_interop_threads()}")
 
     model = RecurrentGeometryModel(
         numeric_input_dim=config["numeric_input_dim"],
@@ -397,14 +413,17 @@ def main() -> None:
     log(f"Transformer layers: {args.num_layers}")
     log(f"Transformer heads: {args.nhead}")
     log(f"Dropout: {args.dropout}")
+    log(f"DataLoader workers: {args.num_workers}")
     log(
         f"Training for up to {args.epochs} epochs with "
         f"early stopping patience={args.patience}."
     )
 
     for epoch in range(1, args.epochs + 1):
+        epoch_start = time.perf_counter()
         train_loss = train_epoch(model, train_loader, optimizer, device, epoch)
         val_loss = eval_epoch(model, val_loader, device)
+        epoch_duration = time.perf_counter() - epoch_start
         improved = val_loss < best_val_loss
 
         if improved:
@@ -424,6 +443,7 @@ def main() -> None:
             f"Epoch {epoch:02d} | train_loss={train_loss:.6f} "
             f"| val_loss={val_loss:.6f}" + (" | best" if improved else "")
         )
+        log(f"Epoch {epoch:02d} completed in {epoch_duration:.1f} sec")
 
         if epochs_no_improve >= args.patience:
             log(f"Early stopping after {epoch:02d} epochs.")
