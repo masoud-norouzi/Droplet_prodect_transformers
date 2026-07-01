@@ -5,8 +5,8 @@ import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
-from configs.settings import TrackingConfig
-from src import schema
+from droplet_detection_tracking import schema
+from droplet_detection_tracking.configs.settings import TrackingConfig
 
 
 class KalmanTrack:

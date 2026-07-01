@@ -10,8 +10,8 @@ import pandas as pd
 from scipy.ndimage import binary_fill_holes
 from skimage import feature, measure, segmentation
 
-from configs.settings import BackgroundConfig, DropletDetectionConfig
-from src import schema
+from droplet_detection_tracking import schema
+from droplet_detection_tracking.configs.settings import BackgroundConfig, DropletDetectionConfig
 
 
 @dataclass(frozen=True)

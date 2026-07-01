@@ -4,9 +4,6 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
-
-
 @dataclass(frozen=True)
 class InputConfig:
     raw_video_dir: Path = Path(r"D:\Microfluidic loop projct\new loop experiments\confined droplets 2")
@@ -17,7 +14,7 @@ class InputConfig:
 @dataclass(frozen=True)
 class OutputConfig:
     experiment_name: str = "2"
-    output_dir: Path = PROJECT_ROOT / "outputs"
+    output_dir: Path = Path("outputs")
     processed_dir: Path = output_dir / "processed"
     run_full_csv_export: bool = True
 

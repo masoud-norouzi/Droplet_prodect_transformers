@@ -25,16 +25,16 @@ the source project.
 
 ```text
 droplet-detection-tracking/
-  configs/
-    settings.py
-  scripts/
-  src/
+  droplet_detection_tracking/
+    configs/
+      settings.py
     detection/
     tracking/
     io.py
     preview.py
     schema.py
-  outputs/
+    cli.py
+  pyproject.toml
 ```
 
 ## Install
@@ -43,16 +43,25 @@ From this folder:
 
 ```powershell
 python -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m pip install -e .
 ```
 
-You can also run it with the parent repository virtual environment if those
-dependencies are already installed.
+From another project, install this package from a local path:
+
+```powershell
+python -m pip install -e "D:\path\to\droplet-detection-tracking"
+```
+
+Or install from a Git repo once this folder is pushed to its own repository:
+
+```powershell
+python -m pip install "git+https://github.com/<owner>/droplet-detection-tracking.git"
+```
 
 ## Run
 
 ```powershell
-python scripts\run_detection_tracking.py --video-path "D:\path\to\video.avi" --experiment-name 2
+droplet-detect-track --video-path "D:\path\to\video.avi" --experiment-name 2
 ```
 
 By default, output is written to:
@@ -70,7 +79,7 @@ outputs/processed/2/tracked_features.csv
 Useful options:
 
 ```powershell
-python scripts\run_detection_tracking.py `
+droplet-detect-track `
   --video-path "D:\path\to\video.avi" `
   --output-dir outputs\processed `
   --experiment-name 2 `
@@ -78,7 +87,7 @@ python scripts\run_detection_tracking.py `
 ```
 
 If `--video-path` is omitted, the script uses the config defaults in
-`configs/settings.py`.
+`droplet_detection_tracking/configs/settings.py`.
 
 ## Behavior-Preserving Note
 

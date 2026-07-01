@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "droplet-detection-tracking"
+version = "0.1.0"
+description = "Droplet detection and tracking pipeline for microscopy videos."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "opencv-python>=4.9.0",
+    "numpy>=1.26.0",
+    "pandas>=2.1.0",
+    "scikit-image>=0.22.0",
+    "scipy>=1.11.0",
+]
+
+[project.scripts]
+droplet-detect-track = "droplet_detection_tracking.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["droplet_detection_tracking*"]

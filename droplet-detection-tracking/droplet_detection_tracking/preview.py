@@ -4,7 +4,7 @@ import cv2
 import numpy as np
 import pandas as pd
 
-from src import schema
+from droplet_detection_tracking import schema
 
 
 def make_preview_frame(

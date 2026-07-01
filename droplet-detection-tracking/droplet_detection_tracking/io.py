@@ -4,9 +4,9 @@ from pathlib import Path
 
 import pandas as pd
 
-from configs.settings import TrackingConfig
-from src import schema
-from src.tracking import DropletTracker, centroid_columns
+from droplet_detection_tracking import schema
+from droplet_detection_tracking.configs.settings import TrackingConfig
+from droplet_detection_tracking.tracking import DropletTracker, centroid_columns
 
 
 def save_detection_csvs(
