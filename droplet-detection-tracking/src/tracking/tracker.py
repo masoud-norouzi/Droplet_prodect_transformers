@@ -1,25 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
-from pathlib import Path
-
 import cv2
 import numpy as np
 import pandas as pd
 from scipy.optimize import linear_sum_assignment
 
-ASSIGNMENT_PREDICTION_WEIGHT = 1
-
-
-@dataclass
-class DropletTrackerConfig:
-    max_assignment_distance: float = None
-    max_missed: int = None
+from configs.settings import TrackingConfig
+from src import schema
 
 
 class KalmanTrack:
-    _predicted_measurement_covariance_inverses: list[np.ndarray] = []
-
     def __init__(self, track_id: int, x: float, y: float):
         self.track_id = track_id
         self.kalman = cv2.KalmanFilter(4, 2)
@@ -39,9 +29,9 @@ class KalmanTrack:
             ],
             dtype=np.float32,
         )
-        self.kalman.processNoiseCov = np.diag([1, 1, 4, 4],).astype(np.float32)*1
+        self.kalman.processNoiseCov = np.diag([1, 1, 4, 4],).astype(np.float32) * 1
         self.kalman.measurementNoiseCov = np.eye(2, dtype=np.float32) * 2
-        self.kalman.errorCovPost = np.eye(4, dtype=np.float32)*10
+        self.kalman.errorCovPost = np.eye(4, dtype=np.float32) * 10
         self.kalman.statePost = np.array([[x], [y], [0], [0]], dtype=np.float32)
 
         self.age = 0
@@ -50,18 +40,15 @@ class KalmanTrack:
         self.latest_position = (float(x), float(y))
         self.last_observed_position = (float(x), float(y))
 
-    def predict(self) -> tuple[float, float]:
+    def predict(self) -> tuple[tuple[float, float], np.ndarray]:
         prediction = self.kalman.predict()
-
-        KalmanTrack._predicted_measurement_covariance_inverses.append(
-            self._compute_innovation_covariance_inverse()
-        )
+        innovation_covariance_inverse = self._compute_innovation_covariance_inverse()
 
         x = float(prediction[0, 0])
         y = float(prediction[1, 0])
         self.age += 1
         self.latest_position = (x, y)
-        return self.latest_position
+        return self.latest_position, innovation_covariance_inverse
 
     def _compute_innovation_covariance_inverse(self) -> np.ndarray:
         H = self.kalman.measurementMatrix.astype(np.float64)
@@ -81,33 +68,29 @@ class KalmanTrack:
 
 
 class DropletTracker:
-    def __init__(
-        self,
-        max_assignment_distance: float = 30.0,
-        max_missed: int = 5,
-    ):
-        self.config = DropletTrackerConfig(
-            max_assignment_distance=max_assignment_distance,
-            max_missed=max_missed,
-        )
+    def __init__(self, config: TrackingConfig | None = None):
+        self.config = config or TrackingConfig()
         self.tracks: list[KalmanTrack] = []
         self.next_track_id = 1
 
     def update(self, detections_df_for_one_frame: pd.DataFrame) -> pd.DataFrame:
         detections = detections_df_for_one_frame.copy()
-        detections["track_id"] = pd.Series(dtype="Int64")
+        detections[schema.TRACK_ID] = pd.Series(dtype="Int64")
 
-        predicted_positions = [track.predict() for track in self.tracks]
+        predictions = [track.predict() for track in self.tracks]
+        predicted_positions = [position for position, _ in predictions]
+        innovation_covariance_inverses = [covariance for _, covariance in predictions]
+
         assignment_positions = []
         for track, (pred_x, pred_y) in zip(self.tracks, predicted_positions):
             last_x, last_y = track.last_observed_position
             assignment_x = (
-                ASSIGNMENT_PREDICTION_WEIGHT * pred_x
-                + (1 - ASSIGNMENT_PREDICTION_WEIGHT) * last_x
+                self.config.assignment_prediction_weight * pred_x
+                + (1 - self.config.assignment_prediction_weight) * last_x
             )
             assignment_y = (
-                ASSIGNMENT_PREDICTION_WEIGHT * pred_y
-                + (1 - ASSIGNMENT_PREDICTION_WEIGHT) * last_y
+                self.config.assignment_prediction_weight * pred_y
+                + (1 - self.config.assignment_prediction_weight) * last_y
             )
             assignment_positions.append((assignment_x, assignment_y))
 
@@ -117,14 +100,18 @@ class DropletTracker:
             self._delete_stale_tracks()
             return detections
 
-        x_col, y_col = _centroid_columns(detections)
+        x_col, y_col = centroid_columns(detections)
         detection_positions = detections[[x_col, y_col]].to_numpy(dtype=float)
 
         matched_tracks: set[int] = set()
         matched_detections: set[int] = set()
 
         if self.tracks:
-            distances = self._distance_matrix(assignment_positions, detection_positions)
+            distances = self._distance_matrix(
+                assignment_positions,
+                detection_positions,
+                innovation_covariance_inverses,
+            )
             track_indices, detection_indices = linear_sum_assignment(distances)
 
             for track_index, detection_index in zip(track_indices, detection_indices):
@@ -135,7 +122,7 @@ class DropletTracker:
                 x, y = detection_positions[detection_index]
                 track = self.tracks[track_index]
                 track.update(float(x), float(y))
-                detections.iat[detection_index, detections.columns.get_loc("track_id")] = (
+                detections.iat[detection_index, detections.columns.get_loc(schema.TRACK_ID)] = (
                     track.track_id
                 )
                 matched_tracks.add(track_index)
@@ -152,18 +139,19 @@ class DropletTracker:
                 continue
 
             track = self._create_track(float(x), float(y))
-            detections.iat[detection_index, detections.columns.get_loc("track_id")] = (
+            detections.iat[detection_index, detections.columns.get_loc(schema.TRACK_ID)] = (
                 track.track_id
             )
 
         self._delete_stale_tracks()
-        detections["track_id"] = detections["track_id"].astype("Int64")
+        detections[schema.TRACK_ID] = detections[schema.TRACK_ID].astype("Int64")
         return detections
 
     @staticmethod
     def _distance_matrix(
         predicted_positions: list[tuple[float, float]],
         detection_positions: np.ndarray,
+        innovation_covariance_inverses: list[np.ndarray],
     ) -> np.ndarray:
         predictions = np.asarray(predicted_positions, dtype=float)
         num_tracks = predictions.shape[0]
@@ -172,21 +160,20 @@ class DropletTracker:
         if num_tracks == 0 or num_detections == 0:
             return np.zeros((num_tracks, num_detections), dtype=float)
 
-        if len(KalmanTrack._predicted_measurement_covariance_inverses) != num_tracks:
+        if len(innovation_covariance_inverses) != num_tracks:
             raise RuntimeError(
                 "Mahalanobis distance requires one innovation covariance per track."
             )
 
         distances = np.empty((num_tracks, num_detections), dtype=float)
-        for track_index, (prediction, S_inv) in enumerate(
-            zip(predictions, KalmanTrack._predicted_measurement_covariance_inverses)
+        for track_index, (prediction, covariance_inverse) in enumerate(
+            zip(predictions, innovation_covariance_inverses)
         ):
             delta = detection_positions - prediction
             distances[track_index] = np.sqrt(
-                np.einsum("ij,ij->i", delta @ S_inv, delta)
+                np.einsum("ij,ij->i", delta @ covariance_inverse, delta)
             )
 
-        KalmanTrack._predicted_measurement_covariance_inverses.clear()
         return distances
 
     def _create_track(self, x: float, y: float) -> KalmanTrack:
@@ -203,43 +190,18 @@ class DropletTracker:
         ]
 
 
-def track_detections(features_csv_path: str, output_csv_path: str) -> pd.DataFrame:
-    features_path = Path(features_csv_path)
-    output_path = Path(output_csv_path)
-
-    features = pd.read_csv(features_path)
-    if features.empty:
-        features["track_id"] = pd.Series(dtype="Int64")
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        features.to_csv(output_path, index=False)
-        return features
-
-    _centroid_columns(features)
-    tracker = DropletTracker(max_assignment_distance=15)
-    tracked_frames = []
-
-    features = features.sort_values("frame").reset_index(drop=True)
-    for _, frame_df in features.groupby("frame", sort=True):
-        tracked_frames.append(tracker.update(frame_df))
-
-    tracked = pd.concat(tracked_frames, ignore_index=True)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    tracked.to_csv(output_path, index=False)
-    return tracked
-
-
-def _centroid_columns(features: pd.DataFrame) -> tuple[str, str]:
-    if "centroid_x" in features.columns:
-        x_col = "centroid_x"
-    elif "centroid-1" in features.columns:
-        x_col = "centroid-1"
+def centroid_columns(features: pd.DataFrame) -> tuple[str, str]:
+    if schema.CENTROID_X in features.columns:
+        x_col = schema.CENTROID_X
+    elif schema.LEGACY_CENTROID_X in features.columns:
+        x_col = schema.LEGACY_CENTROID_X
     else:
         raise KeyError("Missing centroid x column: expected centroid_x or centroid-1")
 
-    if "centroid_y" in features.columns:
-        y_col = "centroid_y"
-    elif "centroid-0" in features.columns:
-        y_col = "centroid-0"
+    if schema.CENTROID_Y in features.columns:
+        y_col = schema.CENTROID_Y
+    elif schema.LEGACY_CENTROID_Y in features.columns:
+        y_col = schema.LEGACY_CENTROID_Y
     else:
         raise KeyError("Missing centroid y column: expected centroid_y or centroid-0")
 

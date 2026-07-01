@@ -26,12 +26,14 @@ the source project.
 ```text
 droplet-detection-tracking/
   configs/
+    settings.py
   scripts/
   src/
     detection/
     tracking/
-    visualization/
-    io/
+    io.py
+    preview.py
+    schema.py
   outputs/
 ```
 
@@ -75,28 +77,8 @@ python scripts\run_detection_tracking.py `
   --no-live-preview
 ```
 
-If `--video-path` is omitted, the script uses the copied config defaults in
-`configs/constants.py` and `configs/paths.py`.
-
-## Compare Old And New Outputs
-
-Run the standalone pipeline on the same video, then compare:
-
-```powershell
-python scripts\compare_old_new_outputs.py `
-  --old-csv "..\outputs\processed\2\tracked_features.csv" `
-  --new-csv "outputs\processed\2\tracked_features.csv" `
-  --output-dir outputs\comparison
-```
-
-This writes:
-
-- `comparison_report.txt`
-- `comparison_summary.csv`
-
-The comparison checks row count, column names, frame range, unique track count,
-per-frame detection counts, and centroid differences when row alignment is
-possible.
+If `--video-path` is omitted, the script uses the config defaults in
+`configs/settings.py`.
 
 ## Behavior-Preserving Note
 

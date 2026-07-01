@@ -1,9 +1,7 @@
+from configs.settings import DropletDetectionConfig
+
 from .pipeline import (
     BackgroundModel,
-    ConnectedComponentDetectionConfig,
     ConnectedComponentDropletDetector,
     DetectionResult,
-    FrameExtractionConfig,
-    VideoFrameExtractor,
 )
-

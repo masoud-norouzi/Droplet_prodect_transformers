@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import math
-from typing import List, Optional
 
 import cv2
 import numpy as np
@@ -11,64 +10,31 @@ import pandas as pd
 from scipy.ndimage import binary_fill_holes
 from skimage import feature, measure, segmentation
 
-
-@dataclass
-class FrameExtractionConfig:
-    every_n_frames: int = 1
-    max_frames: int | None = None
-    start_frame: int = 0
+from configs.settings import BackgroundConfig, DropletDetectionConfig
+from src import schema
 
 
-@dataclass
-class ConnectedComponentDetectionConfig:
-    min_area_ratio: float = 0.8
-    max_area_ratio: float = 1.2
-    min_object_area: int = 20
-    crop_bottom_px: int = 0
-    background_threshold: int = 0
-    background_method: str = "median"
-    background_percentile: int = 50
-    fill_holes: bool = True
-    use_watershed_split: bool = False
-    watershed_min_distance: int = 8
-    fallback_watershed_min_distance: int = 2
-    merged_area_ratio: float = 1.3
-    max_split_objects: int = 2
-
-
-@dataclass
+@dataclass(frozen=True)
 class DetectionResult:
-    features: pd.DataFrame
-    binary_image: np.ndarray
-    filled_image: np.ndarray
-    label_image: np.ndarray
+    detections: pd.DataFrame
+    binary_mask: np.ndarray
+    filled_mask: np.ndarray
+    labels: np.ndarray
     debug_frame: np.ndarray
     cropped_frame: np.ndarray
 
 
 class BackgroundModel:
-    def __init__(
-        self,
-        video_path: Path,
-        crop_bottom_px: int = 0,
-        sample_every_n_frames: int = 1,
-        max_background_frames: int | None = None,
-        method: str = "median",
-        percentile_value: int = 50,
-    ):
+    def __init__(self, video_path: Path, config: BackgroundConfig):
         self.video_path = video_path
-        self.crop_bottom_px = crop_bottom_px
-        self.sample_every_n_frames = sample_every_n_frames
-        self.max_background_frames = max_background_frames
-        self.method = method
-        self.percentile_value = percentile_value
+        self.config = config
 
     def build(self) -> np.ndarray:
         capture = cv2.VideoCapture(str(self.video_path))
         if not capture.isOpened():
             raise RuntimeError(f"Unable to open video: {self.video_path}")
 
-        frames: List[np.ndarray] = []
+        frames: list[np.ndarray] = []
         frame_index = 0
 
         while True:
@@ -76,16 +42,16 @@ class BackgroundModel:
             if not success:
                 break
 
-            if frame_index % self.sample_every_n_frames != 0:
+            if frame_index % self.config.sample_every_n_frames != 0:
                 frame_index += 1
                 continue
 
             gray_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-            if self.crop_bottom_px > 0 and self.crop_bottom_px < gray_frame.shape[0]:
-                gray_frame = gray_frame[: -self.crop_bottom_px, :]
+            if self.config.crop_bottom_px > 0 and self.config.crop_bottom_px < gray_frame.shape[0]:
+                gray_frame = gray_frame[: -self.config.crop_bottom_px, :]
 
             frames.append(gray_frame)
-            if self.max_background_frames is not None and len(frames) >= self.max_background_frames:
+            if self.config.max_background_frames is not None and len(frames) >= self.config.max_background_frames:
                 break
 
             frame_index += 1
@@ -96,57 +62,18 @@ class BackgroundModel:
             raise RuntimeError("No background frames were captured for background model building.")
 
         stack = np.stack(frames, axis=0)
-        if self.method == "percentile":
-            background = np.percentile(stack, self.percentile_value, axis=0)
-        elif self.method == "median":
+        if self.config.method == "percentile":
+            background = np.percentile(stack, self.config.percentile, axis=0)
+        elif self.config.method == "median":
             background = np.median(stack, axis=0)
         else:
-            raise ValueError(f"Unsupported background method: {self.method}")
+            raise ValueError(f"Unsupported background method: {self.config.method}")
 
         return background.astype(np.uint8)
 
 
-class VideoFrameExtractor:
-    def __init__(self, config: FrameExtractionConfig):
-        self.config = config
-
-    def extract_frames(self, video_path: Path, output_dir: Path) -> List[Path]:
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-        capture = cv2.VideoCapture(str(video_path))
-        if not capture.isOpened():
-            raise RuntimeError(f"Unable to open video: {video_path}")
-
-        saved_frames: List[Path] = []
-        frame_index = 0
-
-        while True:
-            success, frame = capture.read()
-            if not success:
-                break
-
-            if frame_index < self.config.start_frame:
-                frame_index += 1
-                continue
-
-            if self.config.max_frames is not None and len(saved_frames) >= self.config.max_frames:
-                break
-
-            if (frame_index - self.config.start_frame) % self.config.every_n_frames == 0:
-                frame_name = f"frame_{len(saved_frames) + 1:05d}.png"
-                frame_path = output_dir / frame_name
-                if not cv2.imwrite(str(frame_path), frame):
-                    raise RuntimeError(f"Unable to write frame image: {frame_path}")
-                saved_frames.append(frame_path)
-
-            frame_index += 1
-
-        capture.release()
-        return saved_frames
-
-
 class ConnectedComponentDropletDetector:
-    def __init__(self, config: ConnectedComponentDetectionConfig):
+    def __init__(self, config: DropletDetectionConfig):
         self.config = config
 
     def detect(
@@ -181,14 +108,14 @@ class ConnectedComponentDropletDetector:
         else:
             label_image = measure.label(cleaned_bool)
 
-        features = self._extract_features(label_image, frame_id)
-        debug_frame = self._render_debug_frame(cropped_frame, features)
+        detections = self._extract_features(label_image, frame_id)
+        debug_frame = self._render_debug_frame(cropped_frame, detections)
 
         return DetectionResult(
-            features=features,
-            binary_image=binary,
-            filled_image=(cleaned_bool.astype(np.uint8) * 255),
-            label_image=label_image.astype(np.int32),
+            detections=detections,
+            binary_mask=binary,
+            filled_mask=(cleaned_bool.astype(np.uint8) * 255),
+            labels=label_image.astype(np.int32),
             debug_frame=debug_frame,
             cropped_frame=cropped_frame,
         )
@@ -318,7 +245,7 @@ class ConnectedComponentDropletDetector:
         return segmentation.watershed(-local_dist, markers, mask=mask_bool)
 
     def _extract_features(self, label_image: np.ndarray, frame_id: int) -> pd.DataFrame:
-        rows: List[dict[str, float | int]] = []
+        rows: list[dict[str, float | int]] = []
         for region in measure.regionprops(label_image):
             if region.area == 0:
                 continue
@@ -336,34 +263,34 @@ class ConnectedComponentDropletDetector:
 
             rows.append(
                 {
-                    "frame": frame_id,
-                    "label": int(region.label),
-                    "centroid_x": float(centroid_x),
-                    "centroid_y": float(centroid_y),
-                    "area": area,
-                    "bbox_x": int(minc),
-                    "bbox_y": int(minr),
-                    "bbox_w": int(width),
-                    "bbox_h": int(height),
-                    "equivalent_radius": equivalent_radius,
-                    "perimeter": perimeter,
-                    "circularity": circularity,
-                    "aspect_ratio": aspect_ratio,
-                    "solidity": solidity,
+                    schema.FRAME: frame_id,
+                    schema.LABEL: int(region.label),
+                    schema.CENTROID_X: float(centroid_x),
+                    schema.CENTROID_Y: float(centroid_y),
+                    schema.AREA: area,
+                    schema.BBOX_X: int(minc),
+                    schema.BBOX_Y: int(minr),
+                    schema.BBOX_W: int(width),
+                    schema.BBOX_H: int(height),
+                    schema.EQUIVALENT_RADIUS: equivalent_radius,
+                    schema.PERIMETER: perimeter,
+                    schema.CIRCULARITY: circularity,
+                    schema.ASPECT_RATIO: aspect_ratio,
+                    schema.SOLIDITY: solidity,
                 }
             )
 
         return pd.DataFrame(rows)
 
-    def _render_debug_frame(self, frame_bgr: np.ndarray, features: pd.DataFrame) -> np.ndarray:
+    def _render_debug_frame(self, frame_bgr: np.ndarray, detections: pd.DataFrame) -> np.ndarray:
         debug_frame = frame_bgr.copy()
-        for _, row in features.iterrows():
-            x = int(row["bbox_x"])
-            y = int(row["bbox_y"])
-            w = int(row["bbox_w"])
-            h = int(row["bbox_h"])
-            centroid = (int(row["centroid_x"]), int(row["centroid_y"]))
-            label_text = str(int(row["label"]))
+        for _, row in detections.iterrows():
+            x = int(row[schema.BBOX_X])
+            y = int(row[schema.BBOX_Y])
+            w = int(row[schema.BBOX_W])
+            h = int(row[schema.BBOX_H])
+            centroid = (int(row[schema.CENTROID_X]), int(row[schema.CENTROID_Y]))
+            label_text = str(int(row[schema.LABEL]))
 
             cv2.rectangle(debug_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
             cv2.circle(debug_frame, centroid, 3, (0, 0, 255), -1)

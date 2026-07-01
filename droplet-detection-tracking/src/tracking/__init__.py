@@ -1,2 +1,3 @@
-from .tracker import DropletTracker, DropletTrackerConfig, KalmanTrack, track_detections
+from configs.settings import TrackingConfig
 
+from .tracker import DropletTracker, KalmanTrack, centroid_columns
