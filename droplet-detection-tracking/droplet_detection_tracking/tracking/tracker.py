@@ -112,6 +112,11 @@ class DropletTracker:
                 detection_positions,
                 innovation_covariance_inverses,
             )
+            distances = self._apply_speed_gate(
+                distances,
+                assignment_positions,
+                detection_positions,
+            )
             track_indices, detection_indices = linear_sum_assignment(distances)
 
             for track_index, detection_index in zip(track_indices, detection_indices):
@@ -175,6 +180,24 @@ class DropletTracker:
             )
 
         return distances
+
+    def _apply_speed_gate(
+        self,
+        distances: np.ndarray,
+        assignment_positions: list[tuple[float, float]],
+        detection_positions: np.ndarray,
+    ) -> np.ndarray:
+        gated_distances = distances.copy()
+        assignments = np.asarray(assignment_positions, dtype=float)
+
+        for track_index, track in enumerate(self.tracks):
+            max_pixel_distance = self.config.max_assignment_speed_px_per_frame * (track.missed + 1)
+            pixel_distances = np.linalg.norm(detection_positions - assignments[track_index], axis=1)
+            gated_distances[track_index, pixel_distances > max_pixel_distance] = (
+                self.config.max_assignment_distance + 1
+            )
+
+        return gated_distances
 
     def _create_track(self, x: float, y: float) -> KalmanTrack:
         track = KalmanTrack(self.next_track_id, x, y)

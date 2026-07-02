@@ -46,6 +46,7 @@ class TrackingConfig:
     max_assignment_distance: float = 25
     max_missed: int = 10
     assignment_prediction_weight: float = 1
+    max_assignment_speed_px_per_frame: float = 20
 
 
 @dataclass(frozen=True)
