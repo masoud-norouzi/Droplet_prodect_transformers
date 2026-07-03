@@ -28,6 +28,7 @@ STRIDE = 5
 BATCH_SIZE = 8
 NUM_WORKERS = 0
 ROLLOUT_STEPS = 10
+PRINT_FIRST_SAMPLE_DIAGNOSTIC = True
 
 
 def main() -> None:
@@ -35,9 +36,19 @@ def main() -> None:
     accumulators = create_accumulators(ROLLOUT_STEPS, include_position=True)
 
     sample_animation_payload = None
+    printed_first_sample_diagnostic = False
     with torch.no_grad():
         for batch_index, batch in enumerate(val_loader, start=1):
             batch = move_batch_to_device(batch, device)
+            if PRINT_FIRST_SAMPLE_DIAGNOSTIC and not printed_first_sample_diagnostic:
+                print_first_sample_entry_diagnostic(
+                    batch=batch,
+                    val_dataset=val_dataset,
+                    normalization_stats=normalization_stats,
+                    device=device,
+                )
+                printed_first_sample_diagnostic = True
+
             rollout = rollout_batch(
                 model=model,
                 batch=batch,
@@ -131,9 +142,14 @@ def rollout_batch(model, batch, val_dataset, normalization_stats):
     step_masks = []
 
     feature_index = val_dataset.feature_indices
-    true_future_xy = get_true_future_xy(batch, val_dataset, device)
+    true_future_features = get_true_future_features(batch, val_dataset, device)
+    true_future_xy = true_future_features[:, :, :, [
+        feature_index["x"],
+        feature_index["y"],
+    ]]
 
     for step_index in range(ROLLOUT_STEPS):
+        previous_last_mask = history_mask[:, -1, :]
         pred = model(rollout_history, history_mask)
         pred_step_norm = pred[:, 0, :, :]
         pred_step_phys = denormalize_targets(
@@ -160,8 +176,18 @@ def rollout_batch(model, batch, val_dataset, normalization_stats):
         new_frame_phys[:, :, feature_index["vx"]] = pred_step_phys[:, :, 0]
         new_frame_phys[:, :, feature_index["vy"]] = pred_step_phys[:, :, 1]
 
-        new_frame_norm = normalize_features(new_frame_phys, normalization_stats, device)
         new_mask = batch["future_mask"][:, step_index, :]
+        entering_mask = new_mask & ~previous_last_mask
+        true_step_features = true_future_features[:, step_index, :, :]
+        true_step_features_finite = torch.isfinite(true_step_features).all(dim=-1)
+        boundary_mask = entering_mask & true_step_features_finite
+        new_frame_phys[boundary_mask] = true_step_features[boundary_mask]
+        pred_step_phys = pred_step_phys.clone()
+        pred_step_phys[boundary_mask] = true_step_phys[boundary_mask]
+        x_new = new_frame_phys[:, :, feature_index["x"]]
+        y_new = new_frame_phys[:, :, feature_index["y"]]
+
+        new_frame_norm = normalize_features(new_frame_phys, normalization_stats, device)
 
         rollout_history = torch.cat(
             [rollout_history[:, 1:, :, :], new_frame_norm[:, None, :, :]],
@@ -187,15 +213,13 @@ def rollout_batch(model, batch, val_dataset, normalization_stats):
     }
 
 
-def get_true_future_xy(batch, val_dataset, device):
+def get_true_future_features(batch, val_dataset, device):
     droplet_ids = batch["droplet_ids"].detach().cpu().numpy()
     frame_starts = batch["frame_start"].detach().cpu().numpy()
     track_id_to_index = {int(track_id): index for index, track_id in enumerate(val_dataset.track_ids)}
-    x_index = val_dataset.feature_indices["x"]
-    y_index = val_dataset.feature_indices["y"]
 
     B, M = droplet_ids.shape
-    true_xy = np.full((B, ROLLOUT_STEPS, M, 2), np.nan, dtype=np.float32)
+    true_features = np.full((B, ROLLOUT_STEPS, M, len(val_dataset.feature_names)), np.nan, dtype=np.float32)
 
     for batch_index in range(B):
         for slot_index in range(M):
@@ -208,10 +232,79 @@ def get_true_future_xy(batch, val_dataset, device):
 
             start = int(frame_starts[batch_index]) + val_dataset.T_history
             end = start + ROLLOUT_STEPS
-            true_xy[batch_index, :, slot_index, 0] = val_dataset.Z[droplet_index, start:end, x_index]
-            true_xy[batch_index, :, slot_index, 1] = val_dataset.Z[droplet_index, start:end, y_index]
+            true_features[batch_index, :, slot_index, :] = val_dataset.Z[droplet_index, start:end, :]
 
-    return torch.as_tensor(true_xy, dtype=torch.float32, device=device)
+    return torch.as_tensor(true_features, dtype=torch.float32, device=device)
+
+
+def print_first_sample_entry_diagnostic(batch, val_dataset, normalization_stats, device):
+    sample_index = 0
+    droplet_ids = batch["droplet_ids"][sample_index].detach().cpu().numpy()
+    initial_last_mask = batch["history_mask"][sample_index, -1, :].detach().cpu().numpy().astype(bool)
+    future_mask = batch["future_mask"][sample_index].detach().cpu().numpy().astype(bool)
+
+    history_phys = denormalize_features(batch["history_x"], normalization_stats, device)
+    last_history_xy = history_phys[sample_index, -1, :, :][:, [
+        val_dataset.feature_indices["x"],
+        val_dataset.feature_indices["y"],
+    ]].detach().cpu().numpy()
+    true_future_features = get_true_future_features(batch, val_dataset, device)
+    true_future_xy = true_future_features[sample_index, :, :, [
+        val_dataset.feature_indices["x"],
+        val_dataset.feature_indices["y"],
+    ]].detach().cpu().numpy()
+
+    print("----------------------------------------------------")
+    print("First Animation Sample Entry Diagnostic")
+    print()
+    print(
+        "slot | droplet_id | history_last_valid | future_valid | "
+        "first_future_step | initial_last_xy | true_future_xy_at_first_valid"
+    )
+
+    new_entry_slots = []
+    for slot_index, droplet_id in enumerate(droplet_ids):
+        if int(droplet_id) < 0:
+            continue
+
+        future_valid_steps = np.flatnonzero(future_mask[:, slot_index])
+        becomes_valid = future_valid_steps.size > 0
+        first_future_step = int(future_valid_steps[0] + 1) if becomes_valid else None
+
+        initial_xy_text = "None"
+        if initial_last_mask[slot_index]:
+            initial_xy = last_history_xy[slot_index]
+            initial_xy_text = f"({initial_xy[0]:.3f}, {initial_xy[1]:.3f})"
+
+        future_xy_text = "None"
+        if becomes_valid:
+            future_xy = true_future_xy[future_valid_steps[0], slot_index]
+            future_xy_text = f"({future_xy[0]:.3f}, {future_xy[1]:.3f})"
+
+        print(
+            f"{slot_index:>4d} | "
+            f"{int(droplet_id):>10d} | "
+            f"{str(bool(initial_last_mask[slot_index])):>18s} | "
+            f"{str(bool(becomes_valid)):>12s} | "
+            f"{str(first_future_step):>17s} | "
+            f"{initial_xy_text:>20s} | "
+            f"{future_xy_text}"
+        )
+
+        if not initial_last_mask[slot_index] and becomes_valid:
+            new_entry_slots.append((slot_index, int(droplet_id), first_future_step, future_xy_text))
+
+    print()
+    print("New-entry slots where history_mask[0, -1, slot] is False and future_mask becomes True:")
+    if not new_entry_slots:
+        print("  None")
+    else:
+        for slot_index, droplet_id, first_future_step, future_xy_text in new_entry_slots:
+            print(
+                f"  slot={slot_index} droplet_id={droplet_id} "
+                f"first_future_step={first_future_step} true_future_xy={future_xy_text}"
+            )
+    print("----------------------------------------------------")
 
 
 def create_accumulators(num_steps, include_position):
