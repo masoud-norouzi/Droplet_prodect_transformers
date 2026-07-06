@@ -103,8 +103,16 @@ class ConnectedComponentDropletDetector:
             filled_bool = self._fill_holes_with_temporary_border(binary_bool)
 
         cleaned_bool = self._remove_small_objects(filled_bool, self.config.min_object_area)
+        prefill_hole_markers = None
+        if self.config.use_prefill_hole_markers and self.config.fill_holes:
+            prefill_hole_markers = self._build_prefill_hole_markers(
+                binary_bool=binary_bool,
+                filled_bool=filled_bool,
+                cleaned_bool=cleaned_bool,
+            )
+
         if self.config.use_watershed_split:
-            label_image = self._segment_with_watershed(cleaned_bool)
+            label_image = self._segment_with_watershed(cleaned_bool, prefill_hole_markers)
         else:
             label_image = measure.label(cleaned_bool)
 
@@ -153,11 +161,49 @@ class ConnectedComponentDropletDetector:
         filled[-1, :] = bottom_row
         return filled
 
-    def _segment_with_watershed(self, mask_bool: np.ndarray) -> np.ndarray:
+    def _build_prefill_hole_markers(
+        self,
+        binary_bool: np.ndarray,
+        filled_bool: np.ndarray,
+        cleaned_bool: np.ndarray,
+    ) -> np.ndarray:
+        hole_bool = filled_bool & ~binary_bool
+        hole_labels = measure.label(hole_bool)
+        markers = np.zeros_like(hole_labels, dtype=np.int32)
+
+        marker_id = 1
+        for region in measure.regionprops(hole_labels):
+            if region.area < self.config.prefill_hole_marker_min_area:
+                continue
+            if region.area > self.config.prefill_hole_marker_max_area:
+                continue
+
+            coords = region.coords
+            if cleaned_bool[coords[:, 0], coords[:, 1]].mean() < 0.95:
+                continue
+
+            markers[coords[:, 0], coords[:, 1]] = marker_id
+            marker_id += 1
+
+        return markers
+
+    def _segment_with_watershed(
+        self,
+        mask_bool: np.ndarray,
+        prefill_hole_markers: np.ndarray | None = None,
+    ) -> np.ndarray:
         if not np.any(mask_bool):
             return measure.label(mask_bool)
 
         dist = cv2.distanceTransform(mask_bool.astype(np.uint8), cv2.DIST_L2, 5)
+        if prefill_hole_markers is not None and prefill_hole_markers.max() > 0:
+            label_image = self._segment_with_prefill_hole_markers(
+                dist=dist,
+                mask_bool=mask_bool,
+                prefill_hole_markers=prefill_hole_markers,
+            )
+            return self._apply_watershed_fallback_per_object(label_image, dist)
+
         marker_mask = mask_bool.astype(np.uint8)
         coordinates = feature.peak_local_max(
             dist,
@@ -177,6 +223,37 @@ class ConnectedComponentDropletDetector:
                 label_image = self._segment_with_watershed_fallback(dist, mask_bool)
 
         return self._apply_watershed_fallback_per_object(label_image, dist)
+
+    def _segment_with_prefill_hole_markers(
+        self,
+        dist: np.ndarray,
+        mask_bool: np.ndarray,
+        prefill_hole_markers: np.ndarray,
+    ) -> np.ndarray:
+        connected_components = measure.label(mask_bool)
+        output_labels = np.zeros_like(connected_components, dtype=np.int32)
+        next_label = 1
+
+        for component in measure.regionprops(connected_components):
+            component_mask = connected_components == component.label
+            component_markers = np.where(component_mask, prefill_hole_markers, 0).astype(np.int32)
+
+            if component_markers.max() > 0:
+                local_labels = segmentation.watershed(
+                    -dist,
+                    component_markers,
+                    mask=component_mask,
+                )
+            else:
+                local_labels = self._segment_with_watershed_fallback(dist, component_mask)
+
+            for local_label in np.unique(local_labels):
+                if local_label == 0:
+                    continue
+                output_labels[local_labels == local_label] = next_label
+                next_label += 1
+
+        return output_labels
 
     def _segment_with_watershed_fallback(self, dist: np.ndarray, mask_bool: np.ndarray) -> np.ndarray:
         fallback_distance = max(1, self.config.fallback_watershed_min_distance)

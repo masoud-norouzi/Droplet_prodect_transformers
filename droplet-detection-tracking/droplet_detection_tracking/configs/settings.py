@@ -35,6 +35,9 @@ class DropletDetectionConfig:
     background_threshold: int = 40
     fill_holes: bool = True
     use_watershed_split: bool = True
+    use_prefill_hole_markers: bool = True
+    prefill_hole_marker_min_area: int = 15
+    prefill_hole_marker_max_area: int = 500
     watershed_min_distance: int = 10
     fallback_watershed_min_distance: int = 5
     merged_area_ratio: float = 1.5
