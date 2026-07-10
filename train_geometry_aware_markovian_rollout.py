@@ -497,7 +497,18 @@ def validate_geometry_integration(model, loader, dataset, bbox_lookup, normaliza
     assert int((first_rollout["geometry_mask"] & first_rollout["boundary_mask"]).sum().detach().cpu()) == 0
 
     montage_path = Path(args.geometry_validation_montage)
-    save_bbox_alignment_montage(examples[: min(len(examples), 20)], channel_mask_np, Path(args.video_path), montage_path, crop_bottom_px=35)
+    montage_saved = False
+    try:
+        save_bbox_alignment_montage(
+            examples[: min(len(examples), 20)],
+            channel_mask_np,
+            Path(args.video_path),
+            montage_path,
+            crop_bottom_px=35,
+        )
+        montage_saved = True
+    except RuntimeError as exc:
+        print(f"WARNING: skipped bbox alignment montage: {exc}")
 
     gradient_report = compute_gradient_diagnostics(
         model=model,
@@ -545,7 +556,7 @@ def validate_geometry_integration(model, loader, dataset, bbox_lookup, normaliza
     aligned = missing_count == 0 and len(bbox_lookup.duplicate_keys) == 0
     print(f"all_checked_identities_aligned: {aligned}")
     print(f"missing bbox records among checked valid droplets: {missing_count}")
-    print(f"montage_path: {montage_path}")
+    print(f"montage_path: {montage_path if montage_saved else 'not saved'}")
     if len(bbox_lookup.duplicate_keys) > 0:
         print("BLOCKER: duplicate (frame, track_id) bbox records exist; inspect detections CSV before full training.")
     elif missing_count > 0:
