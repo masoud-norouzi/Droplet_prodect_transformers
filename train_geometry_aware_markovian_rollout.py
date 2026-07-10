@@ -72,14 +72,16 @@ class FutureBBoxLookup:
         detections = detections.dropna(subset=["frame", "track_id", "bbox_w", "bbox_h"])
         self.values: dict[tuple[int, int], tuple[float, float]] = {}
         self.record_counts: dict[tuple[int, int], int] = {}
+        self.frame_min = int(detections["frame"].min()) if len(detections) else None
+        self.frame_max = int(detections["frame"].max()) if len(detections) else None
         for row in detections.itertuples(index=False):
-            key = (int(row.track_id), int(row.frame))
+            key = (int(row.frame), int(row.track_id))
             self.record_counts[key] = self.record_counts.get(key, 0) + 1
             self.values[key] = (float(row.bbox_w), float(row.bbox_h))
         self.duplicate_keys = [key for key, count in self.record_counts.items() if count > 1]
 
-    def lookup(self, track_id: int, frame: int) -> tuple[float, float] | None:
-        return self.values.get((int(track_id), int(frame)))
+    def lookup(self, frame: int, track_id: int) -> tuple[float, float] | None:
+        return self.values.get((int(frame), int(track_id)))
 
 
 class GeometryAwareDataset(Dataset):
@@ -107,7 +109,7 @@ class GeometryAwareDataset(Dataset):
             for slot_index, track_id in enumerate(droplet_ids):
                 if track_id < 0 or not future_mask[step_index, slot_index]:
                     continue
-                bbox = self.bbox_lookup.lookup(int(track_id), frame)
+                bbox = self.bbox_lookup.lookup(frame, int(track_id))
                 if bbox is None:
                     continue
                 bbox_w, bbox_h = bbox
@@ -142,7 +144,13 @@ def main() -> None:
     print(f"Val windows: {len(val_ds)}")
     print(f"Test windows: {len(test_ds)}")
     print(f"BBox lookup entries: {len(bbox_lookup.values)}")
-    print(f"Duplicate (track_id, frame) bbox keys: {len(bbox_lookup.duplicate_keys)}")
+    print(f"BBox frame range: {bbox_lookup.frame_min}..{bbox_lookup.frame_max}")
+    print(f"Duplicate (frame, track_id) bbox keys: {len(bbox_lookup.duplicate_keys)}")
+    report_bbox_coverage_by_split(
+        {"train": train_ds, "val": val_ds, "test": test_ds},
+        bbox_lookup=bbox_lookup,
+        max_windows=args.bbox_coverage_check_windows,
+    )
 
     train_loader = DataLoader(
         train_ds,
@@ -332,6 +340,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--geometry-validation-batches", type=int, default=3)
     parser.add_argument("--geometry-validation-examples", type=int, default=20)
     parser.add_argument(
+        "--bbox-coverage-check-windows",
+        type=int,
+        default=128,
+        help="Windows per split to check for future bbox coverage before training; 0 checks all, negative skips.",
+    )
+    parser.add_argument(
         "--geometry-validation-montage",
         default="outputs/diagnostics/geometry_aware_bbox_alignment_montage.png",
     )
@@ -361,11 +375,64 @@ def load_channel_mask(mask_path, device) -> torch.Tensor:
     return torch.as_tensor(mask.astype(np.float32), dtype=torch.float32, device=device)
 
 
+def report_bbox_coverage_by_split(datasets, bbox_lookup: FutureBBoxLookup, max_windows: int) -> None:
+    if max_windows < 0:
+        return
+
+    print("BBox coverage diagnostics:")
+    print("  lookup key: (frame, track_id) -> (bbox_w, bbox_h)")
+    for split_name, dataset in datasets.items():
+        if len(dataset) == 0:
+            print(f"  {split_name}: empty split")
+            continue
+
+        if max_windows == 0:
+            indices = range(len(dataset))
+            checked_text = "all"
+        else:
+            checked = min(int(max_windows), len(dataset))
+            indices = range(checked)
+            checked_text = str(checked)
+
+        starts = np.asarray(dataset.start_frames, dtype=np.int64)
+        future_start = int(starts.min()) + dataset.T_history
+        future_end = int(starts.max()) + dataset.T_history + dataset.T_future - 1
+        frame_labels = getattr(dataset, "frames", None)
+        if frame_labels is not None and future_end < len(frame_labels):
+            future_label_start = int(frame_labels[future_start])
+            future_label_end = int(frame_labels[future_end])
+            future_range_text = f"indices {future_start}..{future_end}, labels {future_label_start}..{future_label_end}"
+        else:
+            future_range_text = f"indices {future_start}..{future_end}"
+
+        valid_count = 0
+        bbox_count = 0
+        for index in indices:
+            item = dataset[index]
+            valid = item["future_mask"] & (item["droplet_ids"][None, :] >= 0)
+            valid_count += int(valid.sum().item())
+            bbox_count += int((item["future_bbox_mask"] & valid).sum().item())
+
+        missing_count = valid_count - bbox_count
+        coverage = bbox_count / valid_count if valid_count else 0.0
+        print(
+            f"  {split_name}: checked_windows={checked_text} "
+            f"future_frames=({future_range_text}) "
+            f"valid_future={valid_count} bbox_matches={bbox_count} "
+            f"missing={missing_count} coverage={coverage:.6f}"
+        )
+        if valid_count > 0 and bbox_count == 0:
+            print(
+                f"  WARNING: {split_name} has valid future droplets but zero bbox matches. "
+                "Geometry loss for this split will be exactly zero; check that the detections CSV covers these frames."
+            )
+
+
 def validate_geometry_integration(model, loader, dataset, bbox_lookup, normalization_stats, weights, channel_mask, optimizer, device, args) -> None:
     print("======================================")
     print("GEOMETRY INTEGRATION VALIDATION ONLY")
     print("======================================")
-    print("bbox lookup key: (track_id, frame) -> (bbox_w, bbox_h)")
+    print("bbox lookup key: (frame, track_id) -> (bbox_w, bbox_h)")
     print(f"duplicate bbox records: {len(bbox_lookup.duplicate_keys)}")
     if bbox_lookup.duplicate_keys[:5]:
         print(f"duplicate key examples: {bbox_lookup.duplicate_keys[:5]}")
@@ -466,7 +533,7 @@ def validate_geometry_integration(model, loader, dataset, bbox_lookup, normaliza
     print(f"missing bbox records among checked valid droplets: {missing_count}")
     print(f"montage_path: {montage_path}")
     if len(bbox_lookup.duplicate_keys) > 0:
-        print("BLOCKER: duplicate (track_id, frame) bbox records exist; inspect detections CSV before full training.")
+        print("BLOCKER: duplicate (frame, track_id) bbox records exist; inspect detections CSV before full training.")
     elif missing_count > 0:
         print("BLOCKER: missing bbox records found for valid future droplets.")
     else:
@@ -496,7 +563,7 @@ def collect_bbox_alignment_examples(batch, rollout, dataset, bbox_lookup, channe
                 track_id = int(droplet_ids[batch_index, slot_index])
                 if track_id < 0:
                     continue
-                lookup = bbox_lookup.lookup(track_id, frame)
+                lookup = bbox_lookup.lookup(frame, track_id)
                 has_bbox = bool(future_bbox_mask[batch_index, step_index, slot_index])
                 if lookup is None:
                     missing_count += 1
