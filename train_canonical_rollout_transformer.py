@@ -17,10 +17,11 @@ from utils.canonical_dataset.canonical_window_dataset import create_train_val_te
 
 
 NPZ_PATH = "outputs/processed/2/canonical_dataset.npz"
-BEST_CHECKPOINT_PATH = "outputs/models/canonical_rollout_transformer_best.pt"
-LATEST_CHECKPOINT_PATH = "outputs/models/canonical_rollout_transformer_latest.pt"
-CURVES_CSV_PATH = "outputs/models/canonical_rollout_transformer_training_curves.csv"
-ANIMATION_DIR = "outputs/post_processing/rollout_training_animations"
+OUTPUT_DIR = "outputs/models/train_canonical_rollout_transformer"
+BEST_CHECKPOINT_PATH = f"{OUTPUT_DIR}/canonical_rollout_transformer_best.pt"
+LATEST_CHECKPOINT_PATH = f"{OUTPUT_DIR}/canonical_rollout_transformer_latest.pt"
+CURVES_CSV_PATH = f"{OUTPUT_DIR}/canonical_rollout_transformer_training_curves.csv"
+ANIMATION_DIR = f"{OUTPUT_DIR}/rollout_training_animations"
 
 T_HISTORY = 20
 ROLLOUT_HORIZON = 50

@@ -1,0 +1,164 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
+\usepackage{enumitem}
+\usepackage{hyperref}
+
+\title{Design Proposal:\\
+Local Geometry- and Morphology-Aware Representations for
+Transformer-Based Microfluidic Droplet Dynamics}
+\author{}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\section{Motivation}
+
+Our current results indicate that a Markovian rollout model achieves performance surprisingly close to a History-20 model.
+This suggests that much of the apparent benefit of temporal history may arise from information about the channel geometry rather than from long-term dynamical memory.
+
+The first-generation geometry experiment introduces geometry only through a loss term that penalizes droplets leaving the admissible channel domain.
+
+The next logical step is to investigate whether explicitly providing local geometry as an input representation can replace much of the information currently encoded implicitly by temporal history.
+
+\section{Scientific Hypothesis}
+
+We propose the following hierarchy of hypotheses.
+
+\begin{enumerate}[label=\textbf{H\arabic*.}]
+\item Local channel geometry provides predictive information independent of temporal history.
+\item Droplet morphology contains latent information about deformation, hydrodynamic memory, and collision history.
+\item The combination of local geometry and morphology provides a richer state representation than either alone.
+\end{enumerate}
+
+\section{Current State Representation}
+
+Current droplet state:
+
+\[
+s=(x,y,v_x,v_y,c)
+\]
+
+where $c$ denotes circularity.
+
+Future representation:
+
+\[
+s=(x,y,v_x,v_y,c,w,h,z_{\mathrm{local}})
+\]
+
+where
+
+\begin{itemize}
+\item $w,h$ are bounding-box dimensions,
+\item $z_{\mathrm{local}}$ is a learned embedding extracted from local image information.
+\end{itemize}
+
+\section{Local Patch Representation}
+
+Instead of using only scalar features, each droplet is associated with a fixed-size image patch centered on its centroid.
+
+The patch contains multiple aligned channels:
+
+\begin{enumerate}
+\item grayscale microscope image,
+\item binary droplet segmentation,
+\item binary channel mask,
+\item optional signed-distance-to-wall map.
+\end{enumerate}
+
+These channels are stacked similarly to an RGB image.
+
+The CNN therefore receives
+
+\[
+P=
+\left[
+I_{\mathrm{gray}},
+I_{\mathrm{droplet}},
+I_{\mathrm{channel}},
+I_{\mathrm{distance}}
+\right].
+\]
+
+Importantly, the geometry is not painted onto the grayscale image. Each modality remains a separate channel so that the network can distinguish droplet appearance from channel geometry.
+
+\section{CNN Encoder}
+
+A lightweight CNN extracts a latent representation
+
+\[
+z_{\mathrm{local}}=\mathrm{CNN}(P).
+\]
+
+This embedding is expected to encode simultaneously
+
+\begin{itemize}
+\item droplet deformation,
+\item relaxation state,
+\item interface oscillations,
+\item local wall orientation,
+\item wall curvature,
+\item junction proximity,
+\item available downstream branches.
+\end{itemize}
+
+Unlike handcrafted descriptors, these features are learned directly from experimental observations.
+
+\section{Integration with the Transformer}
+
+The local embedding augments the physical state before Transformer encoding:
+
+\[
+\tilde{s}=
+(x,y,v_x,v_y,c,w,h,z_{\mathrm{local}}).
+\]
+
+Attention therefore operates on both kinematic and learned visual information.
+
+\section{Relationship to Geometry Loss}
+
+The geometry-loss experiment remains scientifically important because it isolates the effect of geometric constraints.
+
+The proposed progression is
+
+\begin{enumerate}
+\item Markov baseline,
+\item Markov + geometry loss,
+\item Markov + local geometry input,
+\item Markov + morphology input,
+\item Markov + morphology + local geometry.
+\end{enumerate}
+
+Each experiment answers a different scientific question rather than simply improving predictive accuracy.
+
+\section{Expected Advantages}
+
+Potential benefits include
+
+\begin{itemize}
+\item improved generalization to unseen channel layouts,
+\item implicit learning of local flow constraints,
+\item richer deformation-aware latent states,
+\item reduced dependence on long temporal histories,
+\item physically interpretable ablation studies.
+\end{itemize}
+
+\section{Long-Term Vision}
+
+Ultimately, the state transition becomes
+
+\[
+s_{t+1}=F_\theta(s_t,G_{\mathrm{local}})
+\]
+
+where $G_{\mathrm{local}}$ is not a handcrafted feature but a learned representation extracted from local channel geometry and droplet morphology.
+
+This framework naturally extends to arbitrary microfluidic networks without redesigning the model for each geometry. The same architecture can adapt to new channel layouts by observing local image patches and channel masks, making geometry an explicit, learnable boundary condition rather than an implicit property hidden within trajectory history.
+
+\end{document}

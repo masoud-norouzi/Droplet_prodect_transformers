@@ -20,7 +20,7 @@ from utils.canonical_dataset.canonical_window_dataset import (
 )
 
 
-CHECKPOINT_PATH = "outputs/models/canonical_window_transformer_best.pt"
+CHECKPOINT_PATH = "outputs/models/train_canonical_window_transformer/canonical_window_transformer_best.pt"
 NPZ_PATH = "outputs/processed/2/canonical_dataset.npz"
 OUTPUT_CSV = "outputs/post_processing/velocity_rmse.csv"
 

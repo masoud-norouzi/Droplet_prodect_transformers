@@ -129,7 +129,11 @@ def main() -> None:
 def parse_args() -> argparse.Namespace:
     default_video = DEFAULT_CONFIG.input.raw_video_dir / DEFAULT_CONFIG.input.video_file_name
     parser = argparse.ArgumentParser(description="Overlay rollout Transformer attention on real video frames.")
-    parser.add_argument("--checkpoint", type=Path, default=Path("outputs/models/canonical_rollout_transformer_best.pt"))
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        default=Path("outputs/models/train_canonical_rollout_transformer/canonical_rollout_transformer_best.pt"),
+    )
     parser.add_argument("--video-path", type=Path, default=default_video)
     parser.add_argument("--npz-path", type=Path, default=Path("outputs/processed/2/canonical_dataset.npz"))
     parser.add_argument("--window-index", type=int, required=True)

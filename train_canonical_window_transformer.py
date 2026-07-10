@@ -15,7 +15,8 @@ from utils.canonical_dataset.canonical_window_dataset import (
 
 
 NPZ_PATH = "outputs/processed/2/canonical_dataset.npz"
-CHECKPOINT_PATH = "outputs/models/canonical_window_transformer_best.pt"
+OUTPUT_DIR = "outputs/models/train_canonical_window_transformer"
+CHECKPOINT_PATH = f"{OUTPUT_DIR}/canonical_window_transformer_best.pt"
 
 T_HISTORY = 20
 T_FUTURE = 10

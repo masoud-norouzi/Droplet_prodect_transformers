@@ -19,7 +19,7 @@ from models.canonical_window_transformer import CanonicalWindowTransformer
 from utils.canonical_dataset.canonical_window_dataset import create_train_val_test_datasets
 
 
-CHECKPOINT_PATH = "outputs/models/canonical_window_transformer_best.pt"
+CHECKPOINT_PATH = "outputs/models/train_canonical_window_transformer/canonical_window_transformer_best.pt"
 NPZ_PATH = "outputs/processed/2/canonical_dataset.npz"
 OUTPUT_CSV = "outputs/post_processing/teacher_forced_rollout_metrics.csv"
 OUTPUT_ANIMATION = "outputs/post_processing/teacher_forced_rollout_sample0.mp4"

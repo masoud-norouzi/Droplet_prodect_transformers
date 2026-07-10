@@ -17,11 +17,12 @@ from utils.canonical_dataset.canonical_window_dataset import create_train_val_te
 
 
 NPZ_PATH = "outputs/processed/2/canonical_dataset.npz"
-BEST_CHECKPOINT_PATH = "outputs/history1/models/markovian_rollout_transformer_best.pt"
-LATEST_CHECKPOINT_PATH = "outputs/history1/models/markovian_rollout_transformer_latest.pt"
-CURVES_CSV_PATH = "outputs/history1/models/markovian_rollout_transformer_training_curves.csv"
-ANIMATION_DIR = "outputs/history1/post_processing/rollout_training_animations"
-VALIDATION_DIR = "outputs/history1/validation"
+OUTPUT_DIR = "outputs/models/train_markovian_rollout_transformer"
+BEST_CHECKPOINT_PATH = f"{OUTPUT_DIR}/markovian_rollout_transformer_best.pt"
+LATEST_CHECKPOINT_PATH = f"{OUTPUT_DIR}/markovian_rollout_transformer_latest.pt"
+CURVES_CSV_PATH = f"{OUTPUT_DIR}/markovian_rollout_transformer_training_curves.csv"
+ANIMATION_DIR = f"{OUTPUT_DIR}/rollout_training_animations"
+VALIDATION_DIR = f"{OUTPUT_DIR}/validation"
 
 T_HISTORY = 1
 ROLLOUT_HORIZON = 50

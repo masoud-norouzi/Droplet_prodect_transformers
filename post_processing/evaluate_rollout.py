@@ -27,7 +27,7 @@ from train_canonical_rollout_transformer import (
 from utils.canonical_dataset.canonical_window_dataset import create_train_val_test_datasets
 
 
-CHECKPOINT_PATH = "outputs/models/canonical_rollout_transformer_best.pt"
+CHECKPOINT_PATH = "outputs/models/train_canonical_rollout_transformer/canonical_rollout_transformer_best.pt"
 NPZ_PATH = "outputs/processed/2/canonical_dataset.npz"
 OUTPUT_CSV = "outputs/post_processing/rollout_metrics.csv"
 OUTPUT_ANIMATION = "outputs/post_processing/rollout_sample0.mp4"

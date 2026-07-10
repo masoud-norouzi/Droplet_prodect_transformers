@@ -29,12 +29,13 @@ from utils.canonical_dataset.canonical_window_dataset import CanonicalWindowData
 
 DEFAULT_NPZ = Path("outputs/processed/2/canonical_dataset.npz")
 DEFAULT_OUTPUT_DIR = Path("outputs/post_processing/rollout_100_frame_animations")
+DEFAULT_CHECKPOINT_DIR = Path("outputs/models/train_canonical_rollout_transformer")
 
 
 def main() -> None:
     args = parse_args()
     device = torch.device("cuda" if torch.cuda.is_available() and not args.cpu else "cpu")
-    checkpoint_path = args.checkpoint or newest_rollout_checkpoint(Path("outputs/models"))
+    checkpoint_path = args.checkpoint or newest_rollout_checkpoint(DEFAULT_CHECKPOINT_DIR)
     checkpoint = torch.load(checkpoint_path, map_location=device, weights_only=False)
 
     model = CanonicalRolloutTransformer(**checkpoint["model_config"]).to(device)
