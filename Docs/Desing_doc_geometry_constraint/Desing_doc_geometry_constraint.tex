@@ -1,0 +1,82 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage[T1]{fontenc}
+\usepackage{lmodern}
+
+\title{Design Considerations for Geometry-Constrained Rollout Learning}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Design Considerations for Geometry-Constrained Rollout Learning}
+
+The Markovian rollout model demonstrated surprisingly competitive performance relative to the history-based model. Although the history-based model achieved slightly lower long-term rollout error, qualitative analysis revealed that one of the primary failure modes of the Markovian model was the gradual drift of predicted trajectories outside the physical microchannel.
+
+This observation led to the hypothesis that temporal history was serving primarily as an implicit representation of the channel geometry rather than providing substantial additional information regarding droplet--droplet interactions. The previous trajectory naturally encodes the local channel centerline, allowing the model to remain within the admissible fluid domain. In contrast, the Markovian model only observes the instantaneous droplet state and therefore has no explicit knowledge of the surrounding geometry.
+
+Rather than increasing the temporal history, we therefore propose introducing an explicit geometric admissibility constraint during training. The objective of this constraint is not to modify the learned physics, but only to eliminate physically impossible predictions. The overall design process consists of the following stages.
+
+\subsection{Step 1: Construction of the Channel Geometry Mask}
+
+A binary channel mask will be generated from the microscopy images, representing the physically admissible fluid domain,
+
+\[
+M(x,y)=
+\begin{cases}
+1,&\text{inside channel}\\
+0,&\text{outside channel}.
+\end{cases}
+\]
+
+Particular care will be taken to ensure that the mask corresponds to the actual fluid region rather than the apparent optical boundary. The mask will be visually validated against multiple experimental frames, including channel bends, junctions, and droplets that appear to be in direct contact with the wall.
+
+The validation criterion is that experimentally observed droplets should not incur significant geometry penalties.
+
+\subsection{Step 2: Representation of the Droplet Footprint}
+
+The geometric constraint must account for the finite spatial extent of droplets rather than treating them as point particles.
+
+Several possible representations were considered, including fixed-radius circles, axis-aligned bounding boxes, and ellipses derived from bounding boxes. During discussion it became clear that neither a centroid-only representation nor a full bounding box is appropriate. A centroid ignores droplet size entirely, while an axis-aligned bounding box introduces large empty regions that would incorrectly penalize valid droplets near channel walls.
+
+For the initial experiment, the true bounding box dimensions obtained from the experimental segmentation will be injected during training as privileged geometric information. These bounding box dimensions will define the effective droplet footprint used by the geometry constraint, allowing the experiment to isolate the role of channel geometry without simultaneously requiring prediction of droplet deformation.
+
+This choice intentionally simplifies the first experiment. Prediction of droplet morphology will be addressed in later work through learned shape representations.
+
+\subsection{Step 3: Differentiable Geometry Constraint}
+
+The geometry constraint will be implemented as a differentiable overlap measure between the predicted droplet footprint and the channel mask.
+
+A key design principle is that the constraint must preserve the underlying physics. Experimentally, droplets frequently travel extremely close to channel walls and may appear almost indistinguishable from the boundary under microscopy. Consequently, the loss must not introduce an artificial wall-repulsion effect.
+
+Instead, the geometry loss should remain essentially inactive while the droplet footprint lies entirely within the admissible domain and increase smoothly only when the predicted footprint extends outside the channel. The constraint therefore acts as a geometric admissibility condition rather than a physical interaction model.
+
+\subsection{Step 4: Calibration Using Experimental Data}
+
+Prior to model training, the geometry constraint will be evaluated using experimentally observed droplet trajectories.
+
+Because all ground-truth trajectories are physically admissible, the resulting geometry penalty should be negligible across the dataset. This calibration step will verify the alignment of the channel mask, the validity of the chosen droplet footprint representation, and the numerical behavior of the differentiable overlap measure.
+
+Only after the geometry loss correctly classifies experimentally observed droplets as admissible will it be incorporated into model training.
+
+\subsection{Step 5: Controlled Ablation Study}
+
+The geometry constraint will initially be introduced into the existing Markovian rollout model without modifying any other aspect of the training procedure. All optimizer settings, rollout horizon, weighting strategy, and evaluation metrics will remain unchanged.
+
+This controlled experiment isolates the contribution of explicit geometric information.
+
+The comparison consists of three progressively richer models:
+
+\begin{enumerate}
+\item Markovian rollout model,
+\item History-20 rollout model,
+\item Markovian rollout model with explicit geometry constraint.
+\end{enumerate}
+
+If the geometry-constrained Markovian model approaches the performance of the history-based model while eliminating physically impossible channel departures, this would provide strong evidence that temporal history primarily supplies an implicit geometric prior rather than long-term dynamical memory.
+
+Future work will replace the injected experimental bounding boxes with learned shape representations obtained directly from droplet image patches, enabling simultaneous prediction of droplet motion, morphology, and geometric footprint.
+
+\end{document}

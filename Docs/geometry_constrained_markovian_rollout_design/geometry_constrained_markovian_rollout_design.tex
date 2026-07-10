@@ -1,0 +1,851 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{enumitem}
+\usepackage{microtype}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{float}
+\usepackage{mathtools}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=blue,
+    citecolor=blue
+}
+
+\title{\textbf{Design of a Geometry-Constrained Markovian Rollout Model}\\
+\large A Physics-Preserving Framework for Microfluidic Droplet Dynamics}
+\author{Research Design Document}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+A Markovian autoregressive Transformer trained on instantaneous droplet states was found to perform nearly as well as a history-based model that used twenty preceding frames. However, qualitative rollout analysis revealed a physically important failure mode: predicted droplet trajectories could drift outside the microfluidic channel, particularly near bends and junctions. This observation motivates the hypothesis that temporal history was being used primarily as an implicit encoding of local channel geometry rather than as a necessary source of long-term dynamical memory. This document presents the design of a geometry-constrained Markovian rollout model. The proposed framework introduces an explicit channel mask and a differentiable geometric admissibility loss that penalizes only physically impossible overlap between the predicted droplet footprint and the solid region. True future bounding-box dimensions extracted from experimental data are used as privileged geometric information in the first controlled experiment, thereby isolating the role of channel geometry without simultaneously requiring shape prediction. The design explicitly avoids artificial wall repulsion and preserves valid near-wall motion.
+\end{abstract}
+
+\section{Scientific Motivation}
+
+The long-term objective is to learn an evolution operator for interacting droplets directly from experimental microscopy data. In its most general form, the system is written as
+
+\begin{equation}
+    \bm{s}_{t+1}
+    =
+    \mathcal{F}\!\left(
+    \bm{s}_{t},
+    \bm{b}_{t},
+    \bm{p}
+    \right),
+\end{equation}
+
+where
+
+\begin{itemize}[leftmargin=1.5em]
+    \item $\bm{s}_{t}$ denotes the instantaneous state of the droplet population,
+    \item $\bm{b}_{t}$ denotes boundary conditions, including droplet injections and exits,
+    \item $\bm{p}$ denotes optional global physical parameters such as flow rates, superficial velocity, or capillary number.
+\end{itemize}
+
+For droplet $i$, the current state representation is
+
+\begin{equation}
+    \bm{s}_{t}^{(i)}
+    =
+    \begin{bmatrix}
+        x_{t}^{(i)} &
+        y_{t}^{(i)} &
+        v_{x,t}^{(i)} &
+        v_{y,t}^{(i)} &
+        c_{t}^{(i)}
+    \end{bmatrix}^{\!\top},
+\end{equation}
+
+where $c_{t}^{(i)}$ is circularity.
+
+The history-based model instead receives a sequence
+
+\begin{equation}
+    \mathcal{H}_{t}^{(i)}
+    =
+    \left\{
+    \bm{s}_{t-T_{\mathrm{h}}+1}^{(i)},
+    \ldots,
+    \bm{s}_{t}^{(i)}
+    \right\},
+    \qquad
+    T_{\mathrm{h}}=20.
+\end{equation}
+
+A separate Markovian control model was trained using only $T_{\mathrm{h}}=1$. Surprisingly, its rollout performance was close to that of the history-based model. The principal qualitative difference was that the Markovian model was more likely to generate trajectories that left the physical channel.
+
+This leads to the central hypothesis:
+
+\begin{quote}
+Temporal history is used primarily as an implicit representation of local channel geometry, rather than as an essential source of long-term dynamical information.
+\end{quote}
+
+A twenty-frame trajectory provides a short local curve that encodes tangent direction, curvature, branch identity, and the previously traversed channel path. The Markovian state lacks this geometric context. The proposed model therefore augments the Markovian dynamics with an explicit geometric admissibility constraint.
+
+\section{Design Objective}
+
+The proposed geometry constraint must satisfy three requirements:
+
+\begin{enumerate}[leftmargin=1.8em]
+    \item It must prevent physically impossible predictions outside the channel.
+    \item It must not penalize valid droplets that are microscopically close to, or apparently touching, the wall.
+    \item It must remain differentiable with respect to predicted droplet position so that it can guide training.
+\end{enumerate}
+
+The intended constraint is not a wall-force model and not a centerline-attraction model. It is a geometric feasibility condition:
+
+\begin{equation}
+    \text{predicted droplet support}
+    \subseteq
+    \text{admissible fluid domain}.
+\end{equation}
+
+\section{Step 1: Construction of the Channel Geometry Mask}
+
+Let $\Omega \subset \mathbb{R}^{2}$ denote the admissible fluid domain. A static binary channel mask is defined on the microscopy image grid:
+
+\begin{equation}
+    M(x,y)
+    =
+    \begin{cases}
+        1, & (x,y)\in\Omega,\\
+        0, & (x,y)\notin\Omega.
+    \end{cases}
+\end{equation}
+
+The mask should represent the physical fluid region rather than merely all bright pixels in the image. Optical blur, wall thickness, and illumination variation may cause the apparent visual boundary to differ from the true fluid--solid interface.
+
+The mask must therefore be validated by overlaying its boundary on representative raw frames, including
+
+\begin{itemize}[leftmargin=1.5em]
+    \item straight channel regions,
+    \item tight bends,
+    \item junctions and bifurcations,
+    \item narrow sections,
+    \item locations where droplets appear to contact the wall.
+\end{itemize}
+
+A useful geometric boundary representation is the zero level set of a signed distance function $\phi$:
+
+\begin{equation}
+    \phi(x,y)
+    =
+    \begin{cases}
+        +d\!\left((x,y),\partial\Omega\right), & (x,y)\in\Omega,\\
+        -d\!\left((x,y),\partial\Omega\right), & (x,y)\notin\Omega,
+    \end{cases}
+\end{equation}
+
+where $d(\cdot,\partial\Omega)$ is Euclidean distance to the channel boundary. The binary mask is sufficient for overlap evaluation, while the signed distance field may later provide smoother diagnostics or alternative penalties.
+
+\subsection*{Validation criterion}
+
+For every experimentally observed droplet $i$ at time $t$, the true footprint should lie almost entirely in $\Omega$. If the mask classifies many valid observations as inadmissible, the mask boundary or coordinate alignment is incorrect.
+
+\section{Step 2: Representation of the Droplet Footprint}
+
+A centroid-only constraint is insufficient because droplets are extended objects. At the same time, a full axis-aligned bounding box is overly conservative because its corners contain empty space, especially for circular or obliquely deformed droplets.
+
+For the first controlled experiment, the true bounding-box dimensions extracted from experimental segmentation will be injected as privileged geometric information. For droplet $i$ at rollout step $t$, let
+
+\begin{equation}
+    w_{t}^{(i)}
+    =
+    x_{\max,t}^{(i)}-x_{\min,t}^{(i)},
+    \qquad
+    h_{t}^{(i)}
+    =
+    y_{\max,t}^{(i)}-y_{\min,t}^{(i)}.
+\end{equation}
+
+The semi-axes are
+
+\begin{equation}
+    a_{t}^{(i)}=\frac{w_{t}^{(i)}}{2},
+    \qquad
+    b_{t}^{(i)}=\frac{h_{t}^{(i)}}{2}.
+\end{equation}
+
+The droplet footprint is approximated by an ellipse centered at the predicted centroid
+$\hat{\bm{r}}_{t}^{(i)}=
+(\hat{x}_{t}^{(i)},\hat{y}_{t}^{(i)})$:
+
+\begin{equation}
+    \mathcal{E}_{t}^{(i)}
+    =
+    \left\{
+    (u,v):
+    \left(\frac{u}{a_{t}^{(i)}}\right)^{2}
+    +
+    \left(\frac{v}{b_{t}^{(i)}}\right)^{2}
+    \leq 1
+    \right\}.
+\end{equation}
+
+Equivalently, the translated footprint in image coordinates is
+
+\begin{equation}
+    \hat{\mathcal{D}}_{t}^{(i)}
+    =
+    \left\{
+    \hat{\bm{r}}_{t}^{(i)}+\bm{u}
+    \;:\;
+    \bm{u}\in\mathcal{E}_{t}^{(i)}
+    \right\}.
+\end{equation}
+
+The corresponding hard indicator is
+
+\begin{equation}
+    E_{t}^{(i)}(u,v)
+    =
+    \mathbb{I}
+    \left[
+    \left(\frac{u}{a_{t}^{(i)}}\right)^{2}
+    +
+    \left(\frac{v}{b_{t}^{(i)}}\right)^{2}
+    \leq 1
+    \right].
+\end{equation}
+
+For differentiable implementation, the hard indicator may be replaced by a soft ellipse:
+
+\begin{equation}
+    \widetilde{E}_{t}^{(i)}(u,v)
+    =
+    \sigma
+    \left[
+    \beta
+    \left(
+    1
+    -
+    \left(\frac{u}{a_{t}^{(i)}}\right)^{2}
+    -
+    \left(\frac{v}{b_{t}^{(i)}}\right)^{2}
+    \right)
+    \right],
+\end{equation}
+
+where $\sigma(\cdot)$ is the logistic sigmoid and $\beta>0$ controls boundary sharpness.
+
+\subsection*{Why true future bounding boxes are used}
+
+The true bounding-box dimensions are not treated as predicted dynamical quantities in this first experiment. They are supplied only to define the experimentally observed droplet extent at each future step.
+
+This creates a controlled oracle-style ablation:
+
+\begin{equation}
+    \text{predicted motion}
+    \;+\;
+    \text{true footprint dimensions}
+    \;+\;
+    \text{known channel geometry}.
+\end{equation}
+
+The goal is to isolate whether explicit geometry can replace the geometric information previously supplied implicitly by temporal history.
+
+Future work will replace true bounding-box dimensions with predicted morphology obtained from droplet image patches or learned shape embeddings.
+
+\section{Step 3: Differentiable Geometric Admissibility Loss}
+
+Let $\mathcal{U}_{t}^{(i)}$ be a fixed sampling grid in local ellipse coordinates. For each local point $\bm{u}_{k}=(u_{k},v_{k})$, the corresponding image-space coordinate is
+
+\begin{equation}
+    \bm{q}_{t,k}^{(i)}
+    =
+    \hat{\bm{r}}_{t}^{(i)}
+    +
+    \bm{u}_{k}.
+\end{equation}
+
+The mask value at a continuous coordinate is obtained by bilinear interpolation:
+
+\begin{equation}
+    \widetilde{M}
+    \left(
+    \bm{q}_{t,k}^{(i)}
+    \right)
+    =
+    \operatorname{BilinearSample}
+    \left(
+    M,
+    \bm{q}_{t,k}^{(i)}
+    \right).
+\end{equation}
+
+Because bilinear sampling is differentiable with respect to the sampling coordinates, the geometry loss produces gradients with respect to the predicted centroid.
+
+The soft fraction of the droplet footprint outside the channel is
+
+\begin{equation}
+    O_{t}^{(i)}
+    =
+    \frac{
+    \sum\limits_{k}
+    \widetilde{E}_{t,k}^{(i)}
+    \left[
+    1-
+    \widetilde{M}
+    \left(
+    \bm{q}_{t,k}^{(i)}
+    \right)
+    \right]
+    }{
+    \sum\limits_{k}
+    \widetilde{E}_{t,k}^{(i)}
+    +\varepsilon
+    },
+\end{equation}
+
+where $\varepsilon>0$ prevents division by zero.
+
+By construction,
+
+\begin{equation}
+    O_{t}^{(i)}\approx 0
+\end{equation}
+
+when the predicted footprint lies inside the channel, even if it is arbitrarily close to the wall, and
+
+\begin{equation}
+    O_{t}^{(i)}>0
+\end{equation}
+
+only when the represented footprint overlaps the inadmissible region.
+
+This is the central physics-preserving property of the design. The model is not encouraged to remain far from walls. It is penalized only when it generates a physically impossible overlap.
+
+\subsection{Tolerance for optical and segmentation uncertainty}
+
+A small nonzero overlap may occur even for valid ground-truth droplets because of
+
+\begin{itemize}[leftmargin=1.5em]
+    \item optical blur,
+    \item imperfect channel-mask alignment,
+    \item uncertainty in bounding-box extraction,
+    \item axis-aligned approximation of deformed droplets.
+\end{itemize}
+
+Therefore, the penalty should include a calibrated tolerance $\tau$.
+
+A simple hinge-style loss is
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{geom},t}^{(i)}
+    =
+    \left[
+    \max
+    \left(
+    O_{t}^{(i)}-\tau,
+    0
+    \right)
+    \right]^{2}.
+\end{equation}
+
+A smooth alternative is
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{geom},t}^{(i)}
+    =
+    \left[
+    \frac{1}{\kappa}
+    \log
+    \left(
+    1+
+    \exp
+    \left[
+    \kappa
+    \left(
+    O_{t}^{(i)}-\tau
+    \right)
+    \right]
+    \right)
+    \right]^{2},
+\end{equation}
+
+which is a squared softplus approximation to the thresholded quadratic penalty. The parameter $\kappa$ controls the sharpness of the transition.
+
+The desired qualitative behavior is
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{geom}}
+    \approx 0
+    \quad
+    \text{for}
+    \quad
+    O\leq\tau,
+\end{equation}
+
+followed by a rapid but continuous increase for $O>\tau$.
+
+\section{Step 4: Calibration Using Experimental Ground Truth}
+
+Before training, the proposed geometry loss must be evaluated on true experimental trajectories.
+
+For every valid droplet observation, compute
+
+\begin{equation}
+    O_{t,\mathrm{GT}}^{(i)}
+    =
+    O
+    \left(
+    \bm{r}_{t,\mathrm{GT}}^{(i)},
+    w_{t,\mathrm{GT}}^{(i)},
+    h_{t,\mathrm{GT}}^{(i)},
+    M
+    \right).
+\end{equation}
+
+Because the experimental trajectories are physically admissible, the empirical distribution
+
+\begin{equation}
+    \left\{
+    O_{t,\mathrm{GT}}^{(i)}
+    \right\}
+\end{equation}
+
+should be concentrated near zero.
+
+A robust tolerance may be chosen from the upper tail of the ground-truth overlap distribution:
+
+\begin{equation}
+    \tau
+    =
+    Q_{q}
+    \left(
+    O_{\mathrm{GT}}
+    \right),
+\end{equation}
+
+where $Q_{q}$ is a high empirical quantile, such as the $99$th or $99.5$th percentile.
+
+Alternatively,
+
+\begin{equation}
+    \tau
+    =
+    \operatorname{median}
+    \left(
+    O_{\mathrm{GT}}
+    \right)
+    +
+    \gamma
+    \operatorname{MAD}
+    \left(
+    O_{\mathrm{GT}}
+    \right),
+\end{equation}
+
+where $\operatorname{MAD}$ is the median absolute deviation and $\gamma$ controls conservativeness.
+
+The calibration stage must include targeted inspection of the largest ground-truth penalties. In particular, the worst cases should be examined at
+
+\begin{itemize}[leftmargin=1.5em]
+    \item bends,
+    \item bifurcations,
+    \item strong collisions,
+    \item highly deformed states,
+    \item apparent wall-contact events.
+\end{itemize}
+
+The geometry constraint is accepted only if it assigns negligible or tolerated loss to valid observations.
+
+\subsection{Synthetic displacement test}
+
+A controlled test should translate an observed droplet footprint across a channel wall. Let $\delta$ denote displacement along the local outward wall normal. Then evaluate
+
+\begin{equation}
+    O(\delta)
+\end{equation}
+
+and
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{geom}}(\delta).
+\end{equation}
+
+The desired behavior is
+
+\begin{equation}
+    \frac{d\mathcal{L}_{\mathrm{geom}}}{d\delta}
+    \approx 0
+    \quad
+    \text{while the footprint is admissible},
+\end{equation}
+
+and
+
+\begin{equation}
+    \frac{d\mathcal{L}_{\mathrm{geom}}}{d\delta}
+    >0
+    \quad
+    \text{once the footprint crosses the wall}.
+\end{equation}
+
+This test directly verifies that the loss does not create a spurious pre-contact repulsive force.
+
+\section{Step 5: Integration With the Rollout Objective}
+
+The existing Markovian rollout model predicts future droplet velocities or positions autoregressively. Let the standard rollout loss be
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{dyn}}
+    =
+    \frac{
+    \sum\limits_{t=1}^{T_{\mathrm{f}}}
+    \sum\limits_{i=1}^{N}
+    m_{t}^{(i)}
+    \omega_{t}
+    \left\|
+    \hat{\bm{y}}_{t}^{(i)}
+    -
+    \bm{y}_{t}^{(i)}
+    \right\|_{2}^{2}
+    }{
+    \sum\limits_{t=1}^{T_{\mathrm{f}}}
+    \sum\limits_{i=1}^{N}
+    m_{t}^{(i)}
+    \omega_{t}
+    +\varepsilon
+    },
+\end{equation}
+
+where
+
+\begin{itemize}[leftmargin=1.5em]
+    \item $T_{\mathrm{f}}=50$ is the rollout horizon,
+    \item $m_{t}^{(i)}$ is the internal-only loss mask,
+    \item $\omega_{t}$ is the rollout-step weighting,
+    \item $\bm{y}_{t}^{(i)}$ is the true target,
+    \item $\hat{\bm{y}}_{t}^{(i)}$ is the model prediction.
+\end{itemize}
+
+The internal-only mask remains
+
+\begin{equation}
+    m_{t}^{(i)}
+    =
+    m_{t,\mathrm{new}}^{(i)}
+    \land
+    \neg
+    m_{t,\mathrm{boundary}}^{(i)}.
+\end{equation}
+
+The aggregated geometry loss is
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{geom}}
+    =
+    \frac{
+    \sum\limits_{t=1}^{T_{\mathrm{f}}}
+    \sum\limits_{i=1}^{N}
+    m_{t}^{(i)}
+    \eta_{t}
+    \mathcal{L}_{\mathrm{geom},t}^{(i)}
+    }{
+    \sum\limits_{t=1}^{T_{\mathrm{f}}}
+    \sum\limits_{i=1}^{N}
+    m_{t}^{(i)}
+    \eta_{t}
+    +\varepsilon
+    },
+\end{equation}
+
+where $\eta_t$ may initially be set equal to $1$ or to the same rollout weighting used in the dynamical loss.
+
+The total training objective is
+
+\begin{equation}
+    \mathcal{L}_{\mathrm{total}}
+    =
+    \mathcal{L}_{\mathrm{dyn}}
+    +
+    \lambda_{\mathrm{geom}}
+    \mathcal{L}_{\mathrm{geom}}.
+\end{equation}
+
+The geometry weight $\lambda_{\mathrm{geom}}$ should be selected such that
+
+\begin{equation}
+    \lambda_{\mathrm{geom}}
+    \mathcal{L}_{\mathrm{geom}}
+    \ll
+    \mathcal{L}_{\mathrm{dyn}}
+\end{equation}
+
+for physically valid predictions, while
+
+\begin{equation}
+    \lambda_{\mathrm{geom}}
+    \mathcal{L}_{\mathrm{geom}}
+    \gtrsim
+    \mathcal{L}_{\mathrm{dyn}}
+\end{equation}
+
+for obvious channel-escape events.
+
+The dynamical and geometric terms must be logged separately. Useful diagnostics include
+
+\begin{align}
+    \overline{O}
+    &=
+    \frac{1}{N_{\mathrm{valid}}}
+    \sum_{t,i}
+    m_t^{(i)} O_t^{(i)},\\
+    O_{\max}
+    &=
+    \max_{t,i}
+    O_t^{(i)},\\
+    f_{\mathrm{escape}}
+    &=
+    \frac{
+    \sum_{t,i}
+    m_t^{(i)}
+    \mathbb{I}[O_t^{(i)}>\tau]
+    }{
+    \sum_{t,i}
+    m_t^{(i)}
+    }.
+\end{align}
+
+A channel-escape duration metric may also be defined by counting consecutive rollout steps for which $O_t^{(i)}>\tau$.
+
+\section{Controlled Ablation Study}
+
+The geometry-aware model should be compared against two existing baselines:
+
+\begin{enumerate}[leftmargin=1.8em]
+    \item Markovian rollout model,
+    \item History-20 rollout model,
+    \item Markovian rollout model with explicit geometry constraint.
+\end{enumerate}
+
+The controlled experiment should keep fixed
+
+\begin{itemize}[leftmargin=1.5em]
+    \item architecture,
+    \item optimizer,
+    \item learning-rate schedule,
+    \item rollout horizon,
+    \item batch construction,
+    \item boundary injection,
+    \item internal-only masking,
+    \item checkpoint-selection logic.
+\end{itemize}
+
+The only substantive modification should be the geometry term.
+
+\subsection{Primary evaluation metrics}
+
+\begin{itemize}[leftmargin=1.5em]
+    \item weighted rollout loss,
+    \item position RMSE,
+    \item stepwise rollout RMSE,
+    \item mean outside-overlap fraction,
+    \item fraction of rollout states violating the channel mask,
+    \item number and duration of escape events.
+\end{itemize}
+
+\subsection{Qualitative evaluation}
+
+Representative rollout videos should be inspected at
+
+\begin{itemize}[leftmargin=1.5em]
+    \item tight bends,
+    \item junctions,
+    \item collision-heavy regions,
+    \item wall-contacting configurations,
+    \item highly deformed droplets.
+\end{itemize}
+
+The central qualitative failure to avoid is artificial wall avoidance. A successful model should permit trajectories to approach the wall as closely as the data permit, while preventing the predicted footprint from entering the solid region.
+
+\section{Interpretation of Possible Outcomes}
+
+\subsection{Outcome A: Geometry closes most of the gap}
+
+If the geometry-constrained Markovian model approaches the History-20 model in rollout accuracy and stability, then the results support the hypothesis
+
+\begin{equation}
+    \text{history benefit}
+    \approx
+    \text{implicit geometric prior}.
+\end{equation}
+
+This would imply that the instantaneous state is already close to Markovian for the interaction dynamics, provided the physical domain is supplied explicitly.
+
+\subsection{Outcome B: Geometry removes escape but not long-term error}
+
+If escape events disappear but long-horizon RMSE remains significantly worse than History-20, then temporal history may still encode missing dynamical variables such as
+
+\begin{itemize}[leftmargin=1.5em]
+    \item deformation memory,
+    \item relaxation state,
+    \item local flow perturbation,
+    \item post-collision interface dynamics.
+\end{itemize}
+
+\subsection{Outcome C: Geometry causes artificial wall repulsion}
+
+If the model systematically shifts trajectories away from walls, then the footprint model, mask boundary, tolerance $\tau$, penalty sharpness $\kappa$, or geometry weight $\lambda_{\mathrm{geom}}$ is too aggressive.
+
+\section{Connection to Future Shape-Aware Modeling}
+
+The present experiment uses true future bounding-box dimensions as oracle geometric information. This is justified because the immediate objective is to isolate the role of geometry.
+
+However, the same design exposes a broader limitation of the current state representation. Circularity alone is insufficient to describe
+
+\begin{itemize}[leftmargin=1.5em]
+    \item deformation direction,
+    \item orientation,
+    \item front--rear asymmetry,
+    \item wall flattening,
+    \item collision-induced elongation,
+    \item relaxation and interface oscillation.
+\end{itemize}
+
+A future state may therefore take the form
+
+\begin{equation}
+    \bm{s}_{t}^{(i)}
+    =
+    \begin{bmatrix}
+        x_t^{(i)} &
+        y_t^{(i)} &
+        v_{x,t}^{(i)} &
+        v_{y,t}^{(i)} &
+        c_t^{(i)} &
+        w_t^{(i)} &
+        h_t^{(i)} &
+        \bm{z}_{\mathrm{shape},t}^{(i)}
+    \end{bmatrix}^{\!\top},
+\end{equation}
+
+where $\bm{z}_{\mathrm{shape},t}^{(i)}$ is a learned embedding obtained from a droplet image patch.
+
+The learned shape state could serve two purposes:
+
+\begin{enumerate}[leftmargin=1.8em]
+    \item encode deformation and relaxation dynamics relevant to future motion,
+    \item predict the future droplet footprint required for geometric admissibility.
+\end{enumerate}
+
+A later model may decode a soft droplet mask
+
+\begin{equation}
+    \widehat{S}_{t}^{(i)}(x,y)
+    =
+    \mathcal{D}
+    \left(
+    \bm{z}_{\mathrm{shape},t}^{(i)}
+    \right),
+\end{equation}
+
+and replace the ellipse overlap with
+
+\begin{equation}
+    O_{t}^{(i)}
+    =
+    \frac{
+    \sum_{x,y}
+    \widehat{S}_{t}^{(i)}(x,y)
+    \left[
+    1-M(x,y)
+    \right]
+    }{
+    \sum_{x,y}
+    \widehat{S}_{t}^{(i)}(x,y)
+    +\varepsilon
+    }.
+\end{equation}
+
+This creates a natural progression from oracle footprint supervision to fully learned morphology-aware dynamics.
+
+\section{Recommended Work Sequence}
+
+\begin{enumerate}[leftmargin=1.8em]
+    \item Construct and visually validate the static channel mask.
+    \item Confirm coordinate alignment between mask, centroids, and bounding boxes.
+    \item Build the true-bbox elliptical footprint representation.
+    \item Evaluate ground-truth overlap statistics.
+    \item Calibrate $\tau$, $\kappa$, and any footprint softness parameter.
+    \item Perform the synthetic wall-crossing displacement test.
+    \item Integrate the geometry term into the existing Markovian trainer.
+    \item Run a short sanity experiment.
+    \item Inspect gradients, losses, and rollout videos.
+    \item Launch full training only after the constraint is shown not to alter valid near-wall behavior.
+\end{enumerate}
+
+\section{Design Principle}
+
+The core design principle is
+
+\begin{quote}
+The geometry mask should remove physically impossible states, not prescribe physically preferred states.
+\end{quote}
+
+The constraint must therefore remain inactive for admissible near-wall motion and activate only when the predicted droplet support enters the solid region. This distinction preserves the observed physics while replacing the implicit geometric memory previously supplied by temporal history.
+
+\section{Bounding-Box Ellipse Validation on Experimental Detections}
+
+As a first coordinate-system sanity check, the existing experimental detections were visualized directly on a raw microscopy frame. The purpose of this diagnostic is to verify that the bounding boxes extracted by the current detection pipeline can be converted into physically reasonable elliptical droplet footprints before those footprints are used in a geometry constraint.
+
+The detection pipeline stores each bounding box in the format
+
+\begin{equation}
+    (x,y,w,h)
+    =
+    (x_{\min},y_{\min},\text{width},\text{height}),
+\end{equation}
+
+where $x$ is the image column coordinate and $y$ is the image row coordinate. Equivalently,
+
+\begin{equation}
+    x_{\max}=x+w,
+    \qquad
+    y_{\max}=y+h.
+\end{equation}
+
+For each detected droplet, an axis-aligned ellipse was fitted inside the corresponding bounding box using
+
+\begin{equation}
+    x_c=\frac{x_{\min}+x_{\max}}{2},
+    \qquad
+    y_c=\frac{y_{\min}+y_{\max}}{2},
+\end{equation}
+
+and
+
+\begin{equation}
+    a=\frac{x_{\max}-x_{\min}}{2},
+    \qquad
+    b=\frac{y_{\max}-y_{\min}}{2}.
+\end{equation}
+
+Figure~\ref{fig:bbox-ellipse-frame48} shows the result for frame 48. Green outlines denote the original detection bounding boxes, while red outlines denote the fitted ellipses. The labels correspond to the detection labels in the frame-level detection table. The visualization uses the same cropped image coordinate system as the detection pipeline: the bottom 35 pixels of the raw frame are removed before detection. Thus the displayed frame has dimensions $624\times597$ pixels, compared with the raw video frame dimensions $624\times632$ pixels.
+
+\begin{figure}[H]
+    \centering
+    \includegraphics[width=0.78\linewidth]{../../outputs/diagnostics/frame_0048_bbox_ellipse_overlay.png}
+    \caption{Validation of bounding-box to ellipse conversion for frame 48. Green rectangles show the original detection bounding boxes. Red ellipses are axis-aligned footprints fitted inside each bounding box using the midpoint and semi-axis formulas above. The alignment confirms that the detection coordinates use OpenCV-style image coordinates, with $x$ increasing to the right and $y$ increasing downward, and that no transposition, vertical flip, or one-based frame-indexing error is present.}
+    \label{fig:bbox-ellipse-frame48}
+\end{figure}
+
+This diagnostic supports the use of bounding-box-derived ellipses as an initial oracle footprint representation. The ellipses are not intended to capture detailed deformation or wall flattening, but they provide a substantially better physical footprint approximation than centroids alone while avoiding the overly conservative empty corners of full rectangular boxes.
+
+\end{document}
