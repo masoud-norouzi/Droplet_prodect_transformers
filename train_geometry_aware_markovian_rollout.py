@@ -68,8 +68,16 @@ MODEL_CONFIG = {
 
 class FutureBBoxLookup:
     def __init__(self, detections_csv: str | Path):
-        detections = pd.read_csv(detections_csv, usecols=["frame", "track_id", "bbox_w", "bbox_h"])
+        self.source_path = Path(detections_csv)
+        self.resolved_source_path = self.source_path.resolve()
+        self.source_size_bytes = self.source_path.stat().st_size
+        self.source_mtime = self.source_path.stat().st_mtime
+        detections = pd.read_csv(self.source_path, usecols=["frame", "track_id", "bbox_w", "bbox_h"])
+        self.raw_rows = int(len(detections))
+        self.raw_frame_min = int(detections["frame"].min()) if len(detections) else None
+        self.raw_frame_max = int(detections["frame"].max()) if len(detections) else None
         detections = detections.dropna(subset=["frame", "track_id", "bbox_w", "bbox_h"])
+        self.valid_rows = int(len(detections))
         self.values: dict[tuple[int, int], tuple[float, float]] = {}
         self.record_counts: dict[tuple[int, int], int] = {}
         self.frame_min = int(detections["frame"].min()) if len(detections) else None
@@ -143,6 +151,12 @@ def main() -> None:
     print(f"Train windows: {len(train_ds)}")
     print(f"Val windows: {len(val_ds)}")
     print(f"Test windows: {len(test_ds)}")
+    print(f"BBox CSV path: {bbox_lookup.resolved_source_path}")
+    print(f"BBox CSV size bytes: {bbox_lookup.source_size_bytes}")
+    print(f"BBox CSV modified unix time: {bbox_lookup.source_mtime:.0f}")
+    print(f"BBox CSV raw rows: {bbox_lookup.raw_rows}")
+    print(f"BBox CSV raw frame range: {bbox_lookup.raw_frame_min}..{bbox_lookup.raw_frame_max}")
+    print(f"BBox CSV rows with non-null frame/track_id/bbox_w/bbox_h: {bbox_lookup.valid_rows}")
     print(f"BBox lookup entries: {len(bbox_lookup.values)}")
     print(f"BBox frame range: {bbox_lookup.frame_min}..{bbox_lookup.frame_max}")
     print(f"Duplicate (frame, track_id) bbox keys: {len(bbox_lookup.duplicate_keys)}")
