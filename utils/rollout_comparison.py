@@ -327,6 +327,7 @@ class RolloutModelComparator:
         self.bootstrap_indices: np.ndarray | None = None
 
     def run_inference(self) -> dict[str, RolloutPrediction]:
+        print("Building aligned validation rollout windows...", flush=True)
         rollout_starts = build_validation_rollout_starts(
             self.npz_path,
             stride=self.stride,
@@ -335,6 +336,8 @@ class RolloutModelComparator:
         )
         if self.max_windows is not None:
             rollout_starts = rollout_starts[: int(self.max_windows)]
+        print(f"Validation rollout windows: {len(rollout_starts)}", flush=True)
+        print("Selecting common droplet slots for all models...", flush=True)
         selected_track_ids = build_common_track_slots(
             self.npz_path,
             rollout_starts,
@@ -343,7 +346,13 @@ class RolloutModelComparator:
             max_droplets=MAX_DROPLETS,
         )
 
-        for model_name, adapter in self.adapters.items():
+        total_models = len(self.adapters)
+        for model_index, (model_name, adapter) in enumerate(self.adapters.items(), start=1):
+            print(
+                f"[{model_index}/{total_models}] Running model '{model_name}' "
+                f"(history={adapter.history_length}, horizon={adapter.horizon})",
+                flush=True,
+            )
             dataset = AlignedRolloutWindowDataset(
                 npz_path=self.npz_path,
                 rollout_starts=rollout_starts,
@@ -356,14 +365,23 @@ class RolloutModelComparator:
             adapter.attach_dataset(dataset)
             loader = DataLoader(dataset, batch_size=self.batch_size, shuffle=False, num_workers=0)
             chunks = []
-            for batch in loader:
+            total_batches = len(loader)
+            for batch_index, batch in enumerate(loader, start=1):
                 device_batch = {
                     key: value.to(adapter.device) if torch.is_tensor(value) else value
                     for key, value in batch.items()
                 }
                 chunks.append(adapter.predict_rollout(device_batch))
+                remaining = total_batches - batch_index
+                print(
+                    f"  {model_name}: batch {batch_index}/{total_batches} "
+                    f"processed, remaining {remaining}",
+                    flush=True,
+                )
             self.predictions[model_name] = concatenate_predictions(model_name, chunks)
+            print(f"[{model_index}/{total_models}] Finished model '{model_name}'", flush=True)
 
+        print("Validating common outputs across models...", flush=True)
         self.validate_common_outputs()
         return self.predictions
 
@@ -388,11 +406,13 @@ class RolloutModelComparator:
         return path
 
     def compute_metrics(self) -> None:
+        print("Computing stepwise and integrated metrics...", flush=True)
         for model_name, prediction in self.predictions.items():
             stepwise = compute_stepwise_rmse(prediction)
             integrated = compute_integrated_metrics(stepwise)
             self.stepwise_metrics[model_name] = stepwise
             self.integrated_metrics[model_name] = integrated
+            print(f"  metrics complete for '{model_name}'", flush=True)
 
     def bootstrap_metrics(self) -> None:
         if not self.predictions:
@@ -408,13 +428,20 @@ class RolloutModelComparator:
                 )
 
         rng = np.random.default_rng(self.seed)
+        print(
+            f"Generating shared bootstrap index matrix: "
+            f"{self.n_bootstrap} replicates x {n_windows} windows",
+            flush=True,
+        )
         self.bootstrap_indices = rng.integers(
             0,
             n_windows,
             size=(self.n_bootstrap, n_windows),
         )
         for model_name, prediction in self.predictions.items():
+            print(f"  bootstrapping '{model_name}'...", flush=True)
             self.bootstrap[model_name] = bootstrap_prediction_metrics(prediction, self.bootstrap_indices)
+            print(f"  bootstrap complete for '{model_name}'", flush=True)
 
     def save_metrics(self) -> tuple[Path, Path]:
         stepwise_path = self.output_dir / "stepwise_metrics.csv"
