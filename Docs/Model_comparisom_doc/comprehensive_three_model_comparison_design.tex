@@ -1,0 +1,2172 @@
+
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath,amssymb,amsfonts,bm}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{longtable}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage{enumitem}
+\usepackage{mathtools}
+\usepackage{physics}
+\usepackage{microtype}
+
+\hypersetup{
+    colorlinks=true,
+    linkcolor=blue,
+    citecolor=blue,
+    urlcolor=blue
+}
+
+\newcommand{\R}{\mathbb{R}}
+\newcommand{\x}{\mathbf{x}}
+\newcommand{\vct}{\mathbf{v}}
+\newcommand{\ehat}{\hat{\mathbf{e}}}
+\newcommand{\that}{\hat{\mathbf{t}}}
+\newcommand{\nhat}{\hat{\mathbf{n}}}
+\newcommand{\pred}{\mathrm{pred}}
+\newcommand{\true}{\mathrm{true}}
+\newcommand{\Mhist}{\mathcal{M}_{\mathrm{H20}}}
+\newcommand{\Mmark}{\mathcal{M}_{\mathrm{M}}}
+\newcommand{\Mgeom}{\mathcal{M}_{\mathrm{MG}}}
+
+\title{\textbf{Design of a Comprehensive Comparative Analysis of History-Based, Markovian, and Geometry-Aware Droplet Rollout Models}}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{abstract}
+This document defines a comprehensive, hypothesis-driven framework for comparing three autoregressive transformer models of many-droplet dynamics in a confined microfluidic geometry: a history-conditioned rollout transformer, a geometry-naive Markovian rollout transformer, and a geometry-aware Markovian rollout transformer. All three models have been trained for 50 epochs and are evaluated under a common 50-step autoregressive rollout protocol. The purpose of the comparison is not merely to rank models according to aggregate root-mean-square error, but to determine what physical and geometric information is supplied by temporal history, what information can be recovered from an instantaneous many-body configuration, and how explicit geometric admissibility changes the modes through which rollout error accumulates.
+
+The analysis is organized around trajectory accuracy, physical failure modes, decomposition of error into channel-aligned coordinates, regime-conditioned performance, interaction-aligned dynamics, branching decisions, and attention structure. Particular emphasis is placed on testing the hypothesis that temporal history acts partly as an implicit geometric prior, while any residual advantage of history may encode dynamical memory associated with droplet deformation, hydrodynamic stresses, and post-interaction relaxation. The proposed framework therefore treats the three trained models as a controlled scientific ablation rather than as three independent predictive systems.
+\end{abstract}
+
+\section{Scientific Objective}
+
+The central scientific question is
+
+\begin{equation}
+\boxed{
+\text{What information does temporal history provide that an instantaneous system state does not?}
+}
+\end{equation}
+
+The current comparison is especially useful because the three trained models differ along two conceptually distinct axes:
+
+\begin{enumerate}
+    \item availability of temporal history;
+    \item explicit enforcement of geometric admissibility.
+\end{enumerate}
+
+The models are:
+
+\begin{table}[h]
+\centering
+\begin{tabular}{lcc}
+\toprule
+Model & Temporal Information & Explicit Geometry Constraint \\
+\midrule
+History-20 rollout transformer & 20 frames & No \\
+Markovian rollout transformer & 1 frame & No \\
+Geometry-aware Markovian transformer & 1 frame & Yes \\
+\bottomrule
+\end{tabular}
+\caption{The three models form a controlled comparison of temporal history and explicit geometric admissibility.}
+\end{table}
+
+Let the instantaneous observable system state be denoted by
+
+\begin{equation}
+\mathcal{S}_t
+=
+\left\{
+\mathbf{s}_t^{(i)}
+\right\}_{i=1}^{N_t},
+\end{equation}
+
+where \(N_t\) is the number of valid droplets at time \(t\), and the observable state of droplet \(i\) may be written as
+
+\begin{equation}
+\mathbf{s}_t^{(i)}
+=
+\left[
+x_t^{(i)},
+y_t^{(i)},
+v_{x,t}^{(i)},
+v_{y,t}^{(i)},
+c_t^{(i)}
+\right],
+\end{equation}
+
+with \(c_t^{(i)}\) denoting circularity.
+
+The history-conditioned model approximates an operator of the form
+
+\begin{equation}
+\hat{\mathcal{S}}_{t+1}
+=
+\Mhist
+\left(
+\mathcal{S}_{t-19},
+\ldots,
+\mathcal{S}_{t}
+\right),
+\end{equation}
+
+whereas the Markovian models approximate
+
+\begin{equation}
+\hat{\mathcal{S}}_{t+1}
+=
+\Mmark
+\left(
+\mathcal{S}_{t}
+\right)
+\end{equation}
+
+and
+
+\begin{equation}
+\hat{\mathcal{S}}_{t+1}
+=
+\Mgeom
+\left(
+\mathcal{S}_{t}
+\right),
+\end{equation}
+
+respectively.
+
+The distinction between \(\Mmark\) and \(\Mgeom\) is not additional state information. Both receive the same instantaneous observable state. Instead, \(\Mgeom\) was trained with an additional geometry-consistency objective that penalizes predicted droplet footprints extending outside the experimentally defined admissible channel domain.
+
+This creates a particularly useful scientific ablation:
+
+\begin{equation}
+\Mhist
+\quad \text{vs.} \quad
+\Mmark
+\end{equation}
+
+tests the value of temporal history, while
+
+\begin{equation}
+\Mmark
+\quad \text{vs.} \quad
+\Mgeom
+\end{equation}
+
+tests the effect of an explicit geometric inductive bias.
+
+The comparison
+
+\begin{equation}
+\Mhist
+\quad \text{vs.} \quad
+\Mgeom
+\end{equation}
+
+then asks whether an explicit geometric prior can recover part of the information that the history-conditioned model may otherwise infer implicitly from recent trajectories.
+
+\section{Common Evaluation Protocol}
+
+A scientifically valid comparison requires that all models be evaluated on exactly the same rollout windows, droplets, boundary conditions, and temporal horizons.
+
+Let a rollout begin at frame \(t_0\). For each model \(m\), define the predicted trajectory of droplet \(i\) over a horizon \(S=50\) as
+
+\begin{equation}
+\left\{
+\hat{\x}_{t_0+s}^{(i,m)}
+\right\}_{s=1}^{50}.
+\end{equation}
+
+The true trajectory is
+
+\begin{equation}
+\left\{
+\x_{t_0+s}^{(i)}
+\right\}_{s=1}^{50}.
+\end{equation}
+
+The models must use the same true boundary-injection protocol. If a new droplet enters the field of view at future step \(s\), its experimentally observed state is injected into each model at the same step. Similarly, the same future validity mask must be used to determine when droplets cease to exist within the observable domain.
+
+The comparison must therefore satisfy
+
+\begin{equation}
+\mathcal{W}_{\Mhist}
+=
+\mathcal{W}_{\Mmark}
+=
+\mathcal{W}_{\Mgeom},
+\end{equation}
+
+where \(\mathcal{W}\) denotes the complete set of evaluation rollout windows.
+
+The same mask should be used for metric calculation:
+
+\begin{equation}
+m_{i,s}
+=
+\begin{cases}
+1, & \text{if droplet } i \text{ is a valid internal future sample at step } s,\\
+0, & \text{otherwise}.
+\end{cases}
+\end{equation}
+
+Boundary-injected states should be excluded from predictive error metrics at the step of injection because their states are externally supplied rather than generated by the learned operator.
+
+\section{Question I: Which Model Predicts Trajectories Most Accurately?}
+
+The first analysis is the conventional predictive benchmark. Although this analysis alone is insufficient for physical interpretation, it establishes the global error structure of the three learned dynamical operators.
+
+\subsection{Stepwise Position Error}
+
+For droplet \(i\), model \(m\), and rollout step \(s\), define the position error vector
+
+\begin{equation}
+\mathbf{e}_{i,s}^{(m)}
+=
+\hat{\x}_{t_0+s}^{(i,m)}
+-
+\x_{t_0+s}^{(i)}.
+\end{equation}
+
+The Euclidean position error is
+
+\begin{equation}
+d_{i,s}^{(m)}
+=
+\left\|
+\mathbf{e}_{i,s}^{(m)}
+\right\|_2
+=
+\sqrt{
+\left(
+\hat{x}_{i,s}^{(m)}-x_{i,s}
+\right)^2
++
+\left(
+\hat{y}_{i,s}^{(m)}-y_{i,s}
+\right)^2
+}.
+\end{equation}
+
+The stepwise position RMSE is
+
+\begin{equation}
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}(s)
+=
+\sqrt{
+\frac{
+\sum_i m_{i,s}
+\left\|
+\mathbf{e}_{i,s}^{(m)}
+\right\|_2^2
+}{
+\sum_i m_{i,s}
+}
+}.
+\end{equation}
+
+The corresponding stepwise position MAE is
+
+\begin{equation}
+\mathrm{MAE}_{\mathrm{pos}}^{(m)}(s)
+=
+\frac{
+\sum_i m_{i,s}
+\left\|
+\mathbf{e}_{i,s}^{(m)}
+\right\|_2
+}{
+\sum_i m_{i,s}
+}.
+\end{equation}
+
+The principal benchmark figure should plot
+
+\begin{equation}
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}(s),
+\qquad
+s=1,\ldots,50,
+\end{equation}
+
+for all three models.
+
+This figure directly reveals the rate of autoregressive error accumulation. Of particular interest is whether the geometry-aware Markovian model exhibits lower short-horizon error but more rapid long-horizon growth.
+
+\subsection{Velocity Error}
+
+Define the velocity prediction error as
+
+\begin{equation}
+\mathbf{e}_{v,i,s}^{(m)}
+=
+\hat{\vct}_{i,s}^{(m)}
+-
+\vct_{i,s}.
+\end{equation}
+
+The velocity RMSE is
+
+\begin{equation}
+\mathrm{RMSE}_{v}^{(m)}(s)
+=
+\sqrt{
+\frac{
+\sum_i m_{i,s}
+\left\|
+\mathbf{e}_{v,i,s}^{(m)}
+\right\|_2^2
+}{
+\sum_i m_{i,s}
+}
+}.
+\end{equation}
+
+Component-wise errors should also be retained:
+
+\begin{align}
+\mathrm{RMSE}_{v_x}^{(m)}(s)
+&=
+\sqrt{
+\frac{
+\sum_i m_{i,s}
+\left(
+\hat{v}_{x,i,s}^{(m)}
+-
+v_{x,i,s}
+\right)^2
+}{
+\sum_i m_{i,s}
+}
+},
+\\
+\mathrm{RMSE}_{v_y}^{(m)}(s)
+&=
+\sqrt{
+\frac{
+\sum_i m_{i,s}
+\left(
+\hat{v}_{y,i,s}^{(m)}
+-
+v_{y,i,s}
+\right)^2
+}{
+\sum_i m_{i,s}
+}
+}.
+\end{align}
+
+These metrics are useful because a model may generate modest instantaneous velocity errors that accumulate into large positional deviations under repeated autoregressive integration.
+
+\subsection{Final-Horizon Error}
+
+The 50-step terminal position RMSE is
+
+\begin{equation}
+\mathrm{RMSE}_{50}^{(m)}
+=
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}(50).
+\end{equation}
+
+This metric should be reported, but it should not be treated as the sole measure of model quality. A single terminal value cannot distinguish between early rapid divergence, gradual accumulation, geometric escape, or channel-constrained phase error.
+
+\subsection{Integrated Rollout Error}
+
+To summarize the entire error-growth curve, define an integrated rollout error
+
+\begin{equation}
+E_{\mathrm{AUC}}^{(m)}
+=
+\sum_{s=1}^{50}
+w_s
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}(s),
+\end{equation}
+
+where \(w_s\) may be uniform,
+
+\begin{equation}
+w_s=\frac{1}{50},
+\end{equation}
+
+or selected to emphasize later rollout steps.
+
+A normalized form is
+
+\begin{equation}
+\bar{E}_{\mathrm{rollout}}^{(m)}
+=
+\frac{1}{50}
+\sum_{s=1}^{50}
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}(s).
+\end{equation}
+
+The AUC-style metric is preferable to terminal RMSE when comparing overall rollout stability.
+
+\subsection{Uncertainty Quantification}
+
+Confidence intervals should be estimated by bootstrap resampling at the rollout-window level rather than at the individual droplet-step level.
+
+Let the evaluation set contain \(K\) rollout windows,
+
+\begin{equation}
+\mathcal{W}
+=
+\left\{
+W_1,\ldots,W_K
+\right\}.
+\end{equation}
+
+For bootstrap replicate \(b\), sample
+
+\begin{equation}
+\mathcal{W}^{*(b)}
+=
+\left\{
+W_{k_1},\ldots,W_{k_K}
+\right\}
+\end{equation}
+
+with replacement from \(\mathcal{W}\).
+
+The metric is recomputed for each bootstrap sample:
+
+\begin{equation}
+\theta^{*(b)}
+=
+f\left(
+\mathcal{W}^{*(b)}
+\right).
+\end{equation}
+
+A percentile-based \(95\%\) confidence interval is then
+
+\begin{equation}
+\left[
+Q_{0.025}
+\left(
+\theta^*
+\right),
+Q_{0.975}
+\left(
+\theta^*
+\right)
+\right].
+\end{equation}
+
+Window-level resampling preserves the strong correlation among droplets and rollout steps belonging to the same dynamical episode.
+
+\section{Question II: How Do the Models Fail Physically?}
+
+Aggregate RMSE answers whether a prediction is wrong, but not how the learned dynamics fail. The second analysis therefore quantifies violations of the experimentally admissible channel geometry.
+
+Let the admissible channel domain be
+
+\begin{equation}
+\Omega \subset \R^2,
+\end{equation}
+
+with complement
+
+\begin{equation}
+\Omega^c
+=
+\R^2\setminus\Omega.
+\end{equation}
+
+For predicted droplet \(i\) at step \(s\), let
+
+\begin{equation}
+\widehat{S}_{i,s}^{(m)}
+\subset \R^2
+\end{equation}
+
+denote the predicted droplet footprint. As in the geometry-aware training design, this footprint may be represented by an ellipse centered at the predicted centroid and parameterized using the experimentally observed future bounding-box dimensions.
+
+\subsection{Outside-Overlap Fraction}
+
+Define the geometric violation fraction
+
+\begin{equation}
+O_{i,s}^{(m)}
+=
+\frac{
+\left|
+\widehat{S}_{i,s}^{(m)}
+\cap
+\Omega^c
+\right|
+}{
+\left|
+\widehat{S}_{i,s}^{(m)}
+\right|
+}.
+\end{equation}
+
+This quantity satisfies
+
+\begin{equation}
+0 \le O_{i,s}^{(m)} \le 1.
+\end{equation}
+
+A value of zero indicates a fully admissible predicted footprint. Positive values quantify the fraction of the predicted droplet area extending beyond the channel domain.
+
+The mean outside-overlap fraction at rollout step \(s\) is
+
+\begin{equation}
+\bar{O}^{(m)}(s)
+=
+\frac{
+\sum_i m_{i,s}
+O_{i,s}^{(m)}
+}{
+\sum_i m_{i,s}
+}.
+\end{equation}
+
+\subsection{Violation Rate}
+
+For a selected tolerance \(\epsilon_O\), define
+
+\begin{equation}
+g_{i,s}^{(m)}
+=
+\mathbb{I}
+\left[
+O_{i,s}^{(m)}
+>
+\epsilon_O
+\right].
+\end{equation}
+
+The geometry violation rate is
+
+\begin{equation}
+R_{\mathrm{viol}}^{(m)}(s)
+=
+\frac{
+\sum_i m_{i,s}
+g_{i,s}^{(m)}
+}{
+\sum_i m_{i,s}
+}.
+\end{equation}
+
+The primary geometry figure should plot
+
+\begin{equation}
+R_{\mathrm{viol}}^{(m)}(s)
+\end{equation}
+
+against rollout step for all three models.
+
+A plausible ordering is
+
+\begin{equation}
+R_{\mathrm{viol}}^{(\Mmark)}
+>
+R_{\mathrm{viol}}^{(\Mhist)}
+>
+R_{\mathrm{viol}}^{(\Mgeom)}.
+\end{equation}
+
+If observed, this would support the hypothesis that temporal history provides an implicit geometric prior, while explicit geometry supervision supplies that information more directly.
+
+\subsection{Escape Events}
+
+A geometric violation should also be analyzed as a temporal event rather than only as an independent frame-level observation.
+
+For a droplet trajectory, define an escape episode as a maximal contiguous interval
+
+\begin{equation}
+[s_a,s_b]
+\end{equation}
+
+such that
+
+\begin{equation}
+g_{i,s}^{(m)}=1
+\qquad
+\forall s\in[s_a,s_b].
+\end{equation}
+
+The escape duration is
+
+\begin{equation}
+D_{\mathrm{escape}}
+=
+s_b-s_a+1.
+\end{equation}
+
+For each model, report:
+
+\begin{itemize}
+    \item number of escape events;
+    \item fraction of trajectories experiencing at least one escape;
+    \item mean and median escape duration;
+    \item distribution of first-escape rollout step;
+    \item probability of recovery to the admissible domain.
+\end{itemize}
+
+The recovery probability may be defined as
+
+\begin{equation}
+P_{\mathrm{recover}}^{(m)}
+=
+\frac{
+N_{\mathrm{escape\ episodes\ followed\ by\ reentry}}
+}{
+N_{\mathrm{escape\ episodes}}
+}.
+\end{equation}
+
+These quantities distinguish brief boundary clipping from persistent unphysical trajectory escape.
+
+\section{Question III: Does Geometry Change the Direction in Which Error Accumulates?}
+
+A central working hypothesis is that explicit geometric admissibility may not reduce the magnitude of the underlying dynamical prediction error. Instead, it may alter the directions through which that error can propagate.
+
+A geometry-naive model can move outside the physical channel and remain Euclidean-close to the true trajectory. A geometry-aware model cannot exploit the same unphysical shortcut. Its error may therefore accumulate along the admissible channel manifold, producing a larger Euclidean separation at long rollout horizons despite remaining more physically plausible.
+
+This hypothesis can be tested by decomposing prediction error into local channel-aligned coordinates.
+
+\subsection{Local Tangent and Normal Basis}
+
+At the true droplet position \(\x_{i,s}\), define a local unit tangent vector
+
+\begin{equation}
+\that_{i,s}
+\end{equation}
+
+and a corresponding unit normal vector
+
+\begin{equation}
+\nhat_{i,s}.
+\end{equation}
+
+The basis satisfies
+
+\begin{align}
+\|\that_{i,s}\|_2 &= 1,\\
+\|\nhat_{i,s}\|_2 &= 1,\\
+\that_{i,s}\cdot\nhat_{i,s} &= 0.
+\end{align}
+
+The centerline is used here only to define an offline diagnostic coordinate system. It is not used as a training target, and no centerline-distance objective is introduced into the learned dynamics.
+
+This distinction is essential. The analysis does not force droplets to move on the centerline and therefore does not reintroduce the earlier centerline-training problem.
+
+\subsection{Tangential Error}
+
+The signed tangential error is
+
+\begin{equation}
+e_{\parallel,i,s}^{(m)}
+=
+\mathbf{e}_{i,s}^{(m)}
+\cdot
+\that_{i,s}.
+\end{equation}
+
+Its absolute magnitude is
+
+\begin{equation}
+\left|
+e_{\parallel,i,s}^{(m)}
+\right|.
+\end{equation}
+
+The tangential RMSE is
+
+\begin{equation}
+\mathrm{RMSE}_{\parallel}^{(m)}(s)
+=
+\sqrt{
+\frac{
+\sum_i m_{i,s}
+\left(
+e_{\parallel,i,s}^{(m)}
+\right)^2
+}{
+\sum_i m_{i,s}
+}
+}.
+\end{equation}
+
+Tangential error primarily represents phase or progression error along the local channel direction. A droplet may remain inside the channel but be too far upstream or downstream relative to the true trajectory.
+
+\subsection{Normal Error}
+
+The signed normal error is
+
+\begin{equation}
+e_{\perp,i,s}^{(m)}
+=
+\mathbf{e}_{i,s}^{(m)}
+\cdot
+\nhat_{i,s}.
+\end{equation}
+
+The normal RMSE is
+
+\begin{equation}
+\mathrm{RMSE}_{\perp}^{(m)}(s)
+=
+\sqrt{
+\frac{
+\sum_i m_{i,s}
+\left(
+e_{\perp,i,s}^{(m)}
+\right)^2
+}{
+\sum_i m_{i,s}
+}
+}.
+\end{equation}
+
+Normal error quantifies displacement across the local channel direction and is therefore more directly associated with wall penetration, lateral misplacement, and geometric inadmissibility.
+
+Because the tangent and normal vectors form an orthonormal basis,
+
+\begin{equation}
+\left\|
+\mathbf{e}_{i,s}^{(m)}
+\right\|_2^2
+=
+\left(
+e_{\parallel,i,s}^{(m)}
+\right)^2
++
+\left(
+e_{\perp,i,s}^{(m)}
+\right)^2.
+\end{equation}
+
+Thus the global Euclidean error can be interpreted as the combined contribution of along-channel and cross-channel error modes.
+
+\subsection{Error-Anisotropy Ratio}
+
+Define an error-anisotropy ratio
+
+\begin{equation}
+A^{(m)}(s)
+=
+\frac{
+\mathrm{RMSE}_{\parallel}^{(m)}(s)
+}{
+\mathrm{RMSE}_{\perp}^{(m)}(s)+\varepsilon
+},
+\end{equation}
+
+where \(\varepsilon\) is a small numerical stabilizer.
+
+A larger value indicates that prediction error is preferentially accumulating along the channel direction.
+
+The key hypothesis is
+
+\begin{align}
+\mathrm{RMSE}_{\perp}^{(\Mgeom)}
+&<
+\mathrm{RMSE}_{\perp}^{(\Mmark)},\\
+\mathrm{RMSE}_{\parallel}^{(\Mgeom)}
+&>
+\mathrm{RMSE}_{\parallel}^{(\Mmark)}
+\quad
+\text{at sufficiently long horizons}.
+\end{align}
+
+If observed, this would support the interpretation
+
+\begin{equation}
+\boxed{
+\text{The geometric constraint changes the admissible modes of prediction-error accumulation.}
+}
+\end{equation}
+
+The geometry-aware model may therefore exhibit a larger long-horizon Euclidean RMSE while simultaneously generating more physically admissible trajectories.
+
+This would demonstrate that global Euclidean error alone can provide a misleading ranking of learned physical simulators.
+
+\section{Question IV: Where Does Temporal History Actually Help?}
+
+Global averaging may conceal the specific physical regimes in which history is informative. The test set should therefore be stratified according to local geometry, interaction strength, and droplet deformation.
+
+\subsection{Straight or Low-Curvature Regions}
+
+Let the local channel curvature be denoted by
+
+\begin{equation}
+\kappa(\ell),
+\end{equation}
+
+where \(\ell\) is arc length along the diagnostic centerline.
+
+A low-curvature regime may be defined by
+
+\begin{equation}
+|\kappa| < \kappa_{\mathrm{low}}.
+\end{equation}
+
+Within these regions, compare
+
+\begin{equation}
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}
+\mid
+|\kappa|<\kappa_{\mathrm{low}}.
+\end{equation}
+
+If the three models perform similarly, then temporal history provides little additional information in locally simple geometric regions.
+
+\subsection{Bends and Junctions}
+
+A high-curvature regime may be defined by
+
+\begin{equation}
+|\kappa|
+\ge
+\kappa_{\mathrm{high}}.
+\end{equation}
+
+Junction regions should preferably be identified separately using fixed spatial regions of interest.
+
+The central comparisons are
+
+\begin{equation}
+\Mhist
+\quad \text{vs.} \quad
+\Mmark
+\end{equation}
+
+and
+
+\begin{equation}
+\Mgeom
+\quad \text{vs.} \quad
+\Mmark.
+\end{equation}
+
+If History-20 strongly outperforms the geometry-naive Markovian model in bends and junctions, this is consistent with the hypothesis that trajectory history provides implicit information about local channel direction and branch identity.
+
+If the geometry-aware Markovian model closes this gap, then
+
+\begin{equation}
+\text{history benefit}
+\approx
+\text{implicit geometric information}
+\end{equation}
+
+for this subset of the dynamics.
+
+More precisely, define the history advantage over the naive Markovian model as
+
+\begin{equation}
+\Delta_{\mathrm{hist}}
+=
+E^{(\Mmark)}
+-
+E^{(\Mhist)},
+\end{equation}
+
+and the geometry recovery as
+
+\begin{equation}
+\Delta_{\mathrm{geom}}
+=
+E^{(\Mmark)}
+-
+E^{(\Mgeom)}.
+\end{equation}
+
+A simple geometry-recovery fraction is
+
+\begin{equation}
+F_{\mathrm{geom}}
+=
+\frac{
+\Delta_{\mathrm{geom}}
+}{
+\Delta_{\mathrm{hist}}
+}.
+\end{equation}
+
+When
+
+\begin{equation}
+F_{\mathrm{geom}}\approx 1,
+\end{equation}
+
+the explicit geometry prior recovers most of the predictive advantage previously supplied by temporal history.
+
+This quantity should be interpreted carefully when \(\Delta_{\mathrm{hist}}\) is small or negative.
+
+\subsection{Close Droplet Interactions}
+
+For droplet \(i\), define the instantaneous nearest-neighbor distance
+
+\begin{equation}
+d_{\min,i,t}
+=
+\min_{j\neq i}
+\left\|
+\x_{i,t}
+-
+\x_{j,t}
+\right\|_2.
+\end{equation}
+
+Interaction strength can initially be approximated using bins of \(d_{\min}\):
+
+\begin{equation}
+\mathcal{B}_1:
+d_{\min}<d_1,
+\end{equation}
+
+\begin{equation}
+\mathcal{B}_2:
+d_1\le d_{\min}<d_2,
+\end{equation}
+
+and
+
+\begin{equation}
+\mathcal{B}_3:
+d_{\min}\ge d_2.
+\end{equation}
+
+For each bin, calculate
+
+\begin{equation}
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}
+\mid
+d_{\min}\in\mathcal{B}_k.
+\end{equation}
+
+An alternative continuous analysis is to estimate
+
+\begin{equation}
+\mathbb{E}
+\left[
+d_{i,s}^{(m)}
+\mid
+d_{\min,i,t_0}
+\right].
+\end{equation}
+
+This analysis asks whether the benefit of history increases as the local many-body interaction environment becomes stronger.
+
+\subsection{Strongly Deformed Droplets}
+
+Circularity provides an available, although incomplete, measure of droplet deformation.
+
+For droplet area \(A\) and perimeter \(P\),
+
+\begin{equation}
+c
+=
+\frac{4\pi A}{P^2}.
+\end{equation}
+
+A perfect circle satisfies
+
+\begin{equation}
+c=1,
+\end{equation}
+
+while deformation generally lowers circularity.
+
+The evaluation set can be stratified into empirical circularity quantiles or physically selected intervals:
+
+\begin{align}
+\mathcal{C}_{\mathrm{high}} &: c\ge c_2,\\
+\mathcal{C}_{\mathrm{mid}} &: c_1\le c<c_2,\\
+\mathcal{C}_{\mathrm{low}} &: c<c_1.
+\end{align}
+
+For each deformation regime, calculate
+
+\begin{equation}
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}
+\mid
+c_{i,t_0}\in\mathcal{C}_k.
+\end{equation}
+
+If all models deteriorate disproportionately for low-circularity droplets, this would motivate a learned morphology representation.
+
+From a fluid-mechanical perspective, deformation is not merely a visual descriptor. Droplet shape reflects the coupled action of viscous stresses, interfacial tension, confinement, and hydrodynamic interactions. Schematically,
+
+\begin{equation}
+\text{shape}
+=
+\mathcal{G}
+\left(
+\text{local flow},
+\text{hydrodynamic stress},
+\text{confinement},
+\text{interaction history}
+\right).
+\end{equation}
+
+Circularity compresses this information into one scalar. A learned image encoder could instead infer a morphology embedding
+
+\begin{equation}
+\mathbf{z}_{\mathrm{shape}}^{(i)}
+=
+f_{\theta}
+\left(
+I_{\mathrm{droplet}}^{(i)}
+\right),
+\end{equation}
+
+where the model itself determines which deformation descriptors are dynamically predictive.
+
+The state could then be augmented as
+
+\begin{equation}
+\tilde{\mathbf{s}}_t^{(i)}
+=
+\left[
+x_t^{(i)},
+y_t^{(i)},
+v_{x,t}^{(i)},
+v_{y,t}^{(i)},
+\mathbf{z}_{\mathrm{shape},t}^{(i)}
+\right].
+\end{equation}
+
+The present three-model comparison should therefore identify whether deformation-sensitive regimes are precisely where the current observable state becomes insufficient.
+
+\section{Question V: Does History Help Specifically After Strong Interactions?}
+
+The most direct test of dynamical memory is to align prediction errors around interaction events.
+
+Suppose a close interaction or collision occurs at time \(t_c\). Define relative event time
+
+\begin{equation}
+\tau
+=
+t-t_c.
+\end{equation}
+
+Thus,
+
+\begin{equation}
+\tau<0
+\end{equation}
+
+represents the pre-interaction period,
+
+\begin{equation}
+\tau=0
+\end{equation}
+
+represents the interaction event, and
+
+\begin{equation}
+\tau>0
+\end{equation}
+
+represents post-interaction evolution.
+
+\subsection{Interaction Event Definition}
+
+An initial operational definition may use nearest-neighbor distance:
+
+\begin{equation}
+t_c
+=
+\arg\min_t
+d_{\min,i,t}
+\end{equation}
+
+within a candidate interaction interval.
+
+A valid strong-interaction event may additionally require
+
+\begin{equation}
+d_{\min,i,t_c}
+<
+d_{\mathrm{collision}},
+\end{equation}
+
+and optionally a measurable deformation response,
+
+\begin{equation}
+c_{i,t_c}
+<
+c_{\mathrm{baseline},i}
+-
+\Delta c_{\min}.
+\end{equation}
+
+This combined criterion would distinguish mere spatial proximity from dynamically significant encounters.
+
+\subsection{Event-Aligned Error}
+
+For each model, calculate
+
+\begin{equation}
+E^{(m)}(\tau)
+=
+\sqrt{
+\frac{
+1
+}{
+N_{\tau}
+}
+\sum_{k=1}^{N_{\tau}}
+\left\|
+\hat{\x}_{k}^{(m)}(\tau)
+-
+\x_k(\tau)
+\right\|_2^2
+}.
+\end{equation}
+
+The principal interaction-aligned figure should plot
+
+\begin{equation}
+E^{(m)}(\tau)
+\end{equation}
+
+for the three models.
+
+A scientifically important outcome would be:
+
+\begin{enumerate}
+    \item comparable performance before the interaction;
+    \item increasing error during strong interaction;
+    \item persistent Markovian degradation after the interaction;
+    \item faster recovery or lower post-interaction error for History-20.
+\end{enumerate}
+
+Such a result would imply
+
+\begin{equation}
+\boxed{
+\text{Temporal history contains dynamical memory beyond geometric information.}
+}
+\end{equation}
+
+A plausible physical interpretation is that the instantaneous observable state
+
+\begin{equation}
+\left[
+x,y,v_x,v_y,c
+\right]
+\end{equation}
+
+is not a sufficient Markov state after strong interactions.
+
+Instead, the true coarse-grained dynamics may depend on a hidden state
+
+\begin{equation}
+\mathbf{h}_t
+\end{equation}
+
+associated with deformation, interfacial relaxation, unresolved flow perturbations, or other latent hydrodynamic variables:
+
+\begin{equation}
+\mathcal{S}_{t+1}
+=
+F
+\left(
+\mathcal{S}_t,
+\mathbf{h}_t
+\right).
+\end{equation}
+
+The hidden state itself may evolve according to
+
+\begin{equation}
+\mathbf{h}_{t+1}
+=
+G
+\left(
+\mathbf{h}_t,
+\mathcal{S}_t
+\right).
+\end{equation}
+
+A history-conditioned transformer may partially reconstruct \(\mathbf{h}_t\) from recent observations:
+
+\begin{equation}
+\hat{\mathbf{h}}_t
+=
+H_{\theta}
+\left(
+\mathcal{S}_{t-19:t}
+\right).
+\end{equation}
+
+The Markovian model cannot perform this reconstruction unless the relevant latent variables are directly encoded in the instantaneous input.
+
+This provides a strong conceptual bridge to learned droplet morphology embeddings.
+
+\subsection{Post-Interaction Excess Error}
+
+Define a pre-interaction baseline error
+
+\begin{equation}
+E_{\mathrm{pre}}^{(m)}
+=
+\frac{1}{|\mathcal{T}_{\mathrm{pre}}|}
+\sum_{\tau\in\mathcal{T}_{\mathrm{pre}}}
+E^{(m)}(\tau)
+\end{equation}
+
+and a post-interaction error
+
+\begin{equation}
+E_{\mathrm{post}}^{(m)}
+=
+\frac{1}{|\mathcal{T}_{\mathrm{post}}|}
+\sum_{\tau\in\mathcal{T}_{\mathrm{post}}}
+E^{(m)}(\tau).
+\end{equation}
+
+The post-interaction excess error is
+
+\begin{equation}
+\Delta E_{\mathrm{interaction}}^{(m)}
+=
+E_{\mathrm{post}}^{(m)}
+-
+E_{\mathrm{pre}}^{(m)}.
+\end{equation}
+
+If
+
+\begin{equation}
+\Delta E_{\mathrm{interaction}}^{(\Mhist)}
+<
+\Delta E_{\mathrm{interaction}}^{(\Mmark)},
+\end{equation}
+
+then history provides a specific advantage in reconstructing post-interaction dynamics.
+
+The refined scientific hypothesis would then be
+
+\begin{equation}
+\boxed{
+\begin{minipage}{0.82\textwidth}
+A substantial fraction of temporal history's predictive benefit is geometric, while its residual benefit emerges primarily after dynamically perturbative interactions and may encode unresolved morphological or hydrodynamic memory.
+\end{minipage}
+}
+\end{equation}
+
+\section{Question VI: Do the Models Predict Branching Decisions Correctly?}
+
+The experimental geometry contains junctions at which droplets select downstream branches. These events provide a discrete, physically interpretable test of the learned dynamics.
+
+Let the true branch selected by droplet \(i\) be
+
+\begin{equation}
+b_i
+\in
+\left\{
+1,\ldots,B
+\right\},
+\end{equation}
+
+and the predicted branch under model \(m\) be
+
+\begin{equation}
+\hat{b}_i^{(m)}.
+\end{equation}
+
+The branch-choice accuracy is
+
+\begin{equation}
+A_{\mathrm{branch}}^{(m)}
+=
+\frac{1}{N_{\mathrm{branch}}}
+\sum_{i=1}^{N_{\mathrm{branch}}}
+\mathbb{I}
+\left[
+\hat{b}_i^{(m)}
+=
+b_i
+\right].
+\end{equation}
+
+For a binary bifurcation, a confusion matrix should also be reported.
+
+\subsection{Conditional Branch Accuracy}
+
+Branch prediction should be stratified by the interaction environment before junction entry.
+
+Define a local congestion measure
+
+\begin{equation}
+\rho_i(R)
+=
+\sum_{j\neq i}
+\mathbb{I}
+\left[
+\left\|
+\x_i-\x_j
+\right\|_2
+<
+R
+\right].
+\end{equation}
+
+Branch accuracy can then be evaluated as
+
+\begin{equation}
+A_{\mathrm{branch}}^{(m)}
+\mid
+\rho_i(R)\in\mathcal{R}_k.
+\end{equation}
+
+Similarly, branch accuracy may be conditioned on nearest-neighbor distance:
+
+\begin{equation}
+A_{\mathrm{branch}}^{(m)}
+\mid
+d_{\min}\in\mathcal{B}_k.
+\end{equation}
+
+The following regimes should be compared:
+
+\begin{itemize}
+    \item isolated droplets;
+    \item low congestion;
+    \item high congestion;
+    \item droplets experiencing a close interaction immediately before the junction.
+\end{itemize}
+
+If branch-choice accuracy remains high under crowded conditions, this suggests that the learned operator captures collective many-droplet effects rather than merely following local channel geometry.
+
+A particularly informative comparison is
+
+\begin{equation}
+A_{\mathrm{branch}}^{(\Mgeom)}
+-
+A_{\mathrm{branch}}^{(\Mmark)}.
+\end{equation}
+
+If geometry-aware training improves branch selection primarily in low-interaction regimes, geometry may dominate the decision. If History-20 retains an advantage specifically in crowded or post-collision regimes, temporal memory may encode collective dynamical context.
+
+\section{Question VII: How Does Attention Structure Differ Across Models?}
+
+Attention analysis should follow, rather than precede, the trajectory and physical-regime analyses. Attention is most interpretable when examined for physical events whose predictive behavior is already understood.
+
+Let
+
+\begin{equation}
+a_{ij}^{(m)}
+\end{equation}
+
+denote the attention weight assigned by target droplet \(i\) to source droplet \(j\), after selecting a clearly defined layer/head aggregation procedure.
+
+For each target droplet,
+
+\begin{equation}
+\sum_j a_{ij}^{(m)}=1.
+\end{equation}
+
+Self-attention may be excluded and the remaining weights renormalized:
+
+\begin{equation}
+\tilde{a}_{ij}^{(m)}
+=
+\frac{
+a_{ij}^{(m)}
+}{
+\sum_{k\neq i}a_{ik}^{(m)}
+},
+\qquad
+j\neq i.
+\end{equation}
+
+\subsection{Attention Distance}
+
+Define the attention-weighted interaction distance
+
+\begin{equation}
+D_{\mathrm{attn},i}^{(m)}
+=
+\sum_{j\neq i}
+\tilde{a}_{ij}^{(m)}
+\left\|
+\x_i-\x_j
+\right\|_2.
+\end{equation}
+
+The population mean is
+
+\begin{equation}
+\bar{D}_{\mathrm{attn}}^{(m)}
+=
+\frac{1}{N}
+\sum_i
+D_{\mathrm{attn},i}^{(m)}.
+\end{equation}
+
+This metric asks whether a model's attention is primarily local or spatially diffuse.
+
+One hypothesis is that the geometry-naive Markovian model may distribute attention more broadly because the instantaneous state lacks explicit information about channel direction or branch identity.
+
+\subsection{Effective Number of Attended Neighbors}
+
+The concentration of attention can be quantified using an inverse participation ratio:
+
+\begin{equation}
+N_{\mathrm{eff},i}^{(m)}
+=
+\frac{
+1
+}{
+\sum_{j\neq i}
+\left(
+\tilde{a}_{ij}^{(m)}
+\right)^2
+}.
+\end{equation}
+
+If all attention is concentrated on one neighbor,
+
+\begin{equation}
+N_{\mathrm{eff}}=1.
+\end{equation}
+
+If attention is uniformly distributed across \(K\) neighbors,
+
+\begin{equation}
+N_{\mathrm{eff}}=K.
+\end{equation}
+
+This metric therefore estimates the effective number of droplets contributing to the model's contextual representation.
+
+\subsection{Attention Entropy}
+
+An additional concentration measure is attention entropy:
+
+\begin{equation}
+H_{\mathrm{attn},i}^{(m)}
+=
+-
+\sum_{j\neq i}
+\tilde{a}_{ij}^{(m)}
+\log
+\tilde{a}_{ij}^{(m)}.
+\end{equation}
+
+Higher entropy indicates diffuse attention, whereas lower entropy indicates selective attention.
+
+\subsection{Event-Conditioned Attention}
+
+Attention metrics should be evaluated in the same physical regimes used for predictive error.
+
+For example,
+
+\begin{equation}
+\mathbb{E}
+\left[
+N_{\mathrm{eff}}
+\mid
+d_{\min}<d_{\mathrm{collision}}
+\right]
+\end{equation}
+
+can be compared with
+
+\begin{equation}
+\mathbb{E}
+\left[
+N_{\mathrm{eff}}
+\mid
+d_{\min}\ge d_{\mathrm{isolated}}
+\right].
+\end{equation}
+
+Similarly, interaction-aligned attention can be defined as
+
+\begin{equation}
+D_{\mathrm{attn}}^{(m)}(\tau)
+\end{equation}
+
+and
+
+\begin{equation}
+N_{\mathrm{eff}}^{(m)}(\tau)
+\end{equation}
+
+relative to collision time \(t_c\).
+
+The key questions are:
+
+\begin{enumerate}
+    \item Does attention become more concentrated during close interactions?
+    \item Does the effective interaction neighborhood expand near junctions?
+    \item Is geometry-naive Markovian attention more diffuse?
+    \item Does geometry-aware training alter attention even though geometry entered through the training objective rather than as an explicit input feature?
+    \item Does History-20 attend differently during post-interaction relaxation?
+\end{enumerate}
+
+The third comparison is particularly interesting because a geometry-consistency loss can reshape the learned internal representation without explicitly providing a geometry token to the transformer.
+
+\section{Unified Evaluation Dataset}
+
+The first implementation step should be a common evaluator that generates a single long-format analysis table for all three models.
+
+Each row should correspond to one model, rollout window, droplet, and future step.
+
+A recommended schema is:
+
+\begin{longtable}{p{0.30\textwidth}p{0.60\textwidth}}
+\toprule
+Field & Description \\
+\midrule
+\endfirsthead
+\toprule
+Field & Description \\
+\midrule
+\endhead
+\texttt{model} & Model identifier: History-20, Markovian, or geometry-aware Markovian. \\
+\texttt{window\_id} & Unique rollout-window identifier. \\
+\texttt{track\_id} & Experimental droplet track identifier. \\
+\texttt{rollout\_step} & Future step \(s\in\{1,\ldots,50\}\). \\
+\texttt{true\_x}, \texttt{true\_y} & True future centroid coordinates. \\
+\texttt{pred\_x}, \texttt{pred\_y} & Predicted centroid coordinates. \\
+\texttt{true\_vx}, \texttt{true\_vy} & True velocity components. \\
+\texttt{pred\_vx}, \texttt{pred\_vy} & Predicted velocity components. \\
+\texttt{circularity} & Experimental circularity measurement. \\
+\texttt{nearest\_neighbor\_distance} & Minimum distance to another valid droplet. \\
+\texttt{geometry\_overlap} & Outside-channel overlap fraction \(O_{i,s}\). \\
+\texttt{tangent\_x}, \texttt{tangent\_y} & Local diagnostic channel tangent. \\
+\texttt{normal\_x}, \texttt{normal\_y} & Local diagnostic channel normal. \\
+\texttt{error\_parallel} & Tangential prediction error. \\
+\texttt{error\_normal} & Normal prediction error. \\
+\texttt{boundary\_injected} & Indicator for externally injected boundary state. \\
+\texttt{valid\_future} & Future validity mask. \\
+\texttt{junction\_id} & Optional junction-region identifier. \\
+\texttt{branch\_true} & True downstream branch. \\
+\texttt{branch\_pred} & Predicted downstream branch. \\
+\texttt{interaction\_event\_id} & Optional close-interaction event identifier. \\
+\texttt{relative\_interaction\_time} & Event-aligned time \(\tau\). \\
+\bottomrule
+\end{longtable}
+
+Attention quantities should either be stored in a separate table or in an event-level table because the natural unit of attention is a target--source pair rather than a target droplet alone.
+
+A corresponding attention table may contain
+
+\begin{equation}
+\left[
+\texttt{model},
+\texttt{window\_id},
+\texttt{step},
+\texttt{target\_track\_id},
+\texttt{source\_track\_id},
+a_{ij},
+d_{ij}
+\right].
+\end{equation}
+
+The common evaluator is important because all downstream plots and statistical comparisons should be derived from the same frozen prediction dataset. Model inference should not be rerun independently for every analysis.
+
+\section{Initial Figure Set}
+
+The first analysis stage should deliberately remain limited to five high-value figures.
+
+\subsection{Figure 1: Position RMSE Versus Rollout Horizon}
+
+Plot
+
+\begin{equation}
+\mathrm{RMSE}_{\mathrm{pos}}^{(m)}(s)
+\end{equation}
+
+for
+
+\begin{equation}
+s=1,\ldots,50.
+\end{equation}
+
+Include window-bootstrap confidence intervals.
+
+This figure establishes global autoregressive stability and identifies horizon-dependent ranking reversals.
+
+\subsection{Figure 2: Velocity RMSE Versus Rollout Horizon}
+
+Plot
+
+\begin{equation}
+\mathrm{RMSE}_{v}^{(m)}(s).
+\end{equation}
+
+This figure helps determine whether long-horizon positional divergence originates from increasingly inaccurate instantaneous dynamics or from accumulation of relatively small persistent velocity biases.
+
+\subsection{Figure 3: Channel Violation Rate Versus Rollout Horizon}
+
+Plot
+
+\begin{equation}
+R_{\mathrm{viol}}^{(m)}(s).
+\end{equation}
+
+This figure directly compares physical admissibility.
+
+The comparison between Figures 1 and 3 is especially important. A model with lower Euclidean RMSE but a substantially higher geometry-violation rate may be numerically closer to the true trajectory while following an unphysical path.
+
+\subsection{Figure 4: Tangential and Normal Error Versus Rollout Horizon}
+
+Plot
+
+\begin{equation}
+\mathrm{RMSE}_{\parallel}^{(m)}(s)
+\end{equation}
+
+and
+
+\begin{equation}
+\mathrm{RMSE}_{\perp}^{(m)}(s)
+\end{equation}
+
+for each model.
+
+The purpose is to test whether geometry-aware training redistributes error from the cross-channel direction into the along-channel direction.
+
+\subsection{Figure 5: Error Conditioned on Deformation and Interaction Proximity}
+
+Evaluate prediction error as a function of
+
+\begin{equation}
+c_{t_0}
+\end{equation}
+
+and
+
+\begin{equation}
+d_{\min,t_0}.
+\end{equation}
+
+The initial implementation may use quantile bins to avoid imposing arbitrary physical thresholds before inspecting the empirical distributions.
+
+For circularity bin \(\mathcal{C}_k\),
+
+\begin{equation}
+E_{c,k}^{(m)}
+=
+\mathbb{E}
+\left[
+d_{i,s}^{(m)}
+\mid
+c_{i,t_0}\in\mathcal{C}_k
+\right].
+\end{equation}
+
+For nearest-neighbor bin \(\mathcal{B}_k\),
+
+\begin{equation}
+E_{d,k}^{(m)}
+=
+\mathbb{E}
+\left[
+d_{i,s}^{(m)}
+\mid
+d_{\min,i,t_0}\in\mathcal{B}_k
+\right].
+\end{equation}
+
+These analyses identify whether model failure is concentrated in deformed or strongly interacting states.
+
+\section{Hypothesis-Driven Decision Logic}
+
+The analysis should not proceed as an indiscriminate generation of metrics. The first five figures should be interpreted before implementing more specialized event analyses.
+
+Several possible outcomes are scientifically distinct.
+
+\subsection{Outcome A: Geometry-Aware Markovian Model Closes the History Gap}
+
+Suppose
+
+\begin{equation}
+E^{(\Mgeom)}
+\approx
+E^{(\Mhist)}
+<
+E^{(\Mmark)}
+\end{equation}
+
+in bends and junctions.
+
+This would support
+
+\begin{equation}
+\boxed{
+\text{A substantial portion of the predictive value of history is an implicit geometric prior.}
+}
+\end{equation}
+
+The instantaneous many-droplet state may be approximately sufficient once the model is given an appropriate geometric inductive bias.
+
+\subsection{Outcome B: Geometry-Aware Model Is Physically Better but Numerically Worse at Long Horizons}
+
+Suppose
+
+\begin{equation}
+R_{\mathrm{viol}}^{(\Mgeom)}
+\ll
+R_{\mathrm{viol}}^{(\Mmark)}
+\end{equation}
+
+but
+
+\begin{equation}
+\mathrm{RMSE}_{50}^{(\Mgeom)}
+>
+\mathrm{RMSE}_{50}^{(\Mmark)}.
+\end{equation}
+
+If this is accompanied by
+
+\begin{equation}
+\mathrm{RMSE}_{\perp}^{(\Mgeom)}
+<
+\mathrm{RMSE}_{\perp}^{(\Mmark)}
+\end{equation}
+
+and
+
+\begin{equation}
+\mathrm{RMSE}_{\parallel}^{(\Mgeom)}
+>
+\mathrm{RMSE}_{\parallel}^{(\Mmark)},
+\end{equation}
+
+then the result supports the error-manifold hypothesis:
+
+\begin{equation}
+\boxed{
+\text{Geometry does not remove dynamical error; it constrains the directions through which error can propagate.}
+}
+\end{equation}
+
+This would explain why a physically constrained model can exhibit a worse long-horizon Euclidean metric.
+
+\subsection{Outcome C: History Retains an Advantage After Strong Interactions}
+
+Suppose the geometry-aware model closes the history gap in simple and geometry-dominated regions but History-20 performs better after close interactions or strong deformation.
+
+Then the data support a two-component interpretation of temporal history:
+
+\begin{equation}
+\text{history information}
+=
+\text{geometric context}
++
+\text{dynamical memory}.
+\end{equation}
+
+The geometric component can be replaced by explicit geometric supervision:
+
+\begin{equation}
+\text{implicit geometry from history}
+\longrightarrow
+\text{explicit geometry prior}.
+\end{equation}
+
+The residual component may reflect unresolved physical state:
+
+\begin{equation}
+\text{dynamical memory}
+\approx
+\text{deformation state}
++
+\text{stress history}
++
+\text{flow perturbation memory}.
+\end{equation}
+
+This outcome would directly motivate learned morphology embeddings.
+
+\subsection{Outcome D: All Models Fail for Strongly Deformed Droplets}
+
+Suppose
+
+\begin{equation}
+E^{(m)}
+\mid
+c<c_{\mathrm{low}}
+\gg
+E^{(m)}
+\mid
+c\ge c_{\mathrm{high}}
+\end{equation}
+
+for all three models.
+
+This would indicate that neither temporal history nor explicit channel geometry fully resolves the missing state information.
+
+The current scalar circularity feature may then be insufficient:
+
+\begin{equation}
+c_t
+\not\Rightarrow
+\text{complete deformation state}.
+\end{equation}
+
+A learned morphology embedding becomes the natural next model extension:
+
+\begin{equation}
+\mathbf{z}_{\mathrm{shape}}
+=
+f_{\theta}
+\left(
+I_{\mathrm{droplet}}
+\right),
+\end{equation}
+
+where the network discovers the shape descriptors that matter for future dynamics rather than relying on manually selected quantities such as aspect ratio, eccentricity, orientation, or circularity.
+
+\section{Recommended Analysis Sequence}
+
+The work should proceed in the following order.
+
+\subsection*{Phase 1: Common Inference and Evaluation Infrastructure}
+
+Implement one evaluator capable of loading each trained checkpoint and running all three models over an identical frozen set of 50-step rollout windows.
+
+The evaluator should:
+
+\begin{enumerate}
+    \item load the common evaluation windows;
+    \item preserve identical slot and track identities;
+    \item apply identical boundary injection;
+    \item apply identical future exit masks;
+    \item autoregressively roll each model for 50 steps;
+    \item save true and predicted states at every step;
+    \item save geometric overlap diagnostics;
+    \item save the variables required for later regime-conditioned analyses;
+    \item write one common long-format results table.
+\end{enumerate}
+
+The invariant to preserve is
+
+\begin{equation}
+\text{same physical episode}
++
+\text{same boundary conditions}
++
+\text{same evaluation mask}
++
+\text{different learned operator}.
+\end{equation}
+
+\subsection*{Phase 2: Generate the First Five Figures}
+
+Produce only:
+
+\begin{enumerate}
+    \item position RMSE versus rollout step;
+    \item velocity RMSE versus rollout step;
+    \item channel violation rate versus rollout step;
+    \item tangential and normal error versus rollout step;
+    \item error conditioned on circularity and nearest-neighbor distance.
+\end{enumerate}
+
+All model comparisons should use paired evaluation windows.
+
+Where practical, report paired window-level differences. For metric \(E\), define
+
+\begin{equation}
+\Delta E_k^{(a,b)}
+=
+E_k^{(a)}
+-
+E_k^{(b)}
+\end{equation}
+
+for rollout window \(k\).
+
+The average paired difference is
+
+\begin{equation}
+\overline{\Delta E}^{(a,b)}
+=
+\frac{1}{K}
+\sum_{k=1}^{K}
+\Delta E_k^{(a,b)}.
+\end{equation}
+
+Bootstrap confidence intervals can then be calculated directly for the paired differences.
+
+\subsection*{Phase 3: Interpret Before Extending}
+
+The first five figures should determine the next analysis.
+
+If geometry appears to recover the history advantage primarily in bends and junctions, prioritize branch-choice analysis.
+
+If model ranking diverges sharply after close interactions, prioritize collision-aligned analysis.
+
+If deformation strongly predicts failure, prioritize morphology-sensitive analysis and the learned shape-embedding model.
+
+If the geometry-aware model shows lower normal error but larger tangential error, prioritize the error-manifold interpretation.
+
+Attention analysis should be performed on the physical regimes identified by these results rather than on arbitrarily selected visually interesting windows.
+
+\section{Central Scientific Interpretation}
+
+The three-model comparison should be framed as an investigation of state sufficiency in a coarse-grained many-droplet dynamical system.
+
+A strict Markovian assumption states
+
+\begin{equation}
+P
+\left(
+\mathcal{S}_{t+1}
+\mid
+\mathcal{S}_{0:t}
+\right)
+=
+P
+\left(
+\mathcal{S}_{t+1}
+\mid
+\mathcal{S}_t
+\right).
+\end{equation}
+
+The surprising performance of the geometry-naive Markovian rollout model suggests that the instantaneous configuration
+
+\begin{equation}
+\mathcal{S}_t
+\end{equation}
+
+contains substantially more predictive information than initially expected.
+
+However, the comparison with History-20 and the geometry-aware Markovian model allows the apparent Markov property to be interrogated more carefully.
+
+One possibility is that the observed state is approximately Markovian but geometrically ambiguous:
+
+\begin{equation}
+\mathcal{S}_{t+1}
+\approx
+F
+\left(
+\mathcal{S}_t,
+\Omega
+\right).
+\end{equation}
+
+In this interpretation, temporal history helps because recent motion reveals the local geometry:
+
+\begin{equation}
+\mathcal{S}_{t-19:t}
+\longrightarrow
+\text{channel direction, curvature, branch identity}.
+\end{equation}
+
+An explicit geometry prior may therefore replace much of the historical context.
+
+A second possibility is that the observable state is genuinely incomplete:
+
+\begin{equation}
+\mathcal{S}_{t+1}
+=
+F
+\left(
+\mathcal{S}_t,
+\Omega,
+\mathbf{h}_t
+\right),
+\end{equation}
+
+where \(\mathbf{h}_t\) is an unresolved physical state.
+
+The history model may infer
+
+\begin{equation}
+\mathbf{h}_t
+\approx
+H
+\left(
+\mathcal{S}_{t-19:t}
+\right),
+\end{equation}
+
+while a learned morphology encoder may eventually provide a more direct estimate:
+
+\begin{equation}
+\mathbf{h}_t
+\approx
+f_{\theta}
+\left(
+I_{\mathrm{droplet},t}
+\right).
+\end{equation}
+
+The comparison therefore leads to a deeper scientific question than model ranking:
+
+\begin{equation}
+\boxed{
+\text{Is temporal history valuable because it encodes geometry, or because the measured instantaneous state is not physically complete?}
+}
+\end{equation}
+
+The current working hypothesis is that both effects are present:
+
+\begin{equation}
+\boxed{
+\text{history benefit}
+=
+\text{implicit geometric prior}
++
+\text{residual dynamical memory}.
+}
+\end{equation}
+
+The geometry-aware Markovian model is designed to isolate the first term. Interaction-aligned and deformation-conditioned analyses are designed to identify the second.
+
+\section{Final Working Hypotheses}
+
+The comprehensive comparison should explicitly test the following hypotheses.
+
+\paragraph{H1: Implicit geometry hypothesis.}
+Temporal history improves prediction partly because recent trajectories reveal channel direction, curvature, and branch identity.
+
+\begin{equation}
+\Mhist > \Mmark
+\quad
+\text{especially in geometrically ambiguous regions}.
+\end{equation}
+
+\paragraph{H2: Explicit geometry substitution hypothesis.}
+A geometry-aware Markovian model can recover part of the predictive benefit of temporal history.
+
+\begin{equation}
+\Mgeom \rightarrow \Mhist
+\quad
+\text{in geometry-dominated regimes}.
+\end{equation}
+
+\paragraph{H3: Error-manifold hypothesis.}
+Geometric admissibility changes the directional structure of rollout error.
+
+\begin{equation}
+e_{\perp}^{(\Mgeom)}
+<
+e_{\perp}^{(\Mmark)}
+\end{equation}
+
+while long-horizon
+
+\begin{equation}
+e_{\parallel}^{(\Mgeom)}
+\end{equation}
+
+may increase because error is forced to propagate through the channel manifold.
+
+\paragraph{H4: Interaction-memory hypothesis.}
+Temporal history retains a specific advantage following strong droplet--droplet interactions.
+
+\begin{equation}
+\Delta E_{\mathrm{interaction}}^{(\Mhist)}
+<
+\Delta E_{\mathrm{interaction}}^{(\Mmark)}.
+\end{equation}
+
+\paragraph{H5: Incomplete morphology hypothesis.}
+Circularity does not provide a sufficient description of the dynamically relevant deformation state.
+
+\begin{equation}
+c_t
+\not\equiv
+\mathbf{h}_{\mathrm{deformation},t}.
+\end{equation}
+
+A learned morphology representation
+
+\begin{equation}
+\mathbf{z}_{\mathrm{shape}}
+=
+f_{\theta}
+\left(
+I_{\mathrm{droplet}}
+\right)
+\end{equation}
+
+may recover the deformation descriptors that are actually predictive of future dynamics.
+
+\paragraph{H6: Collective decision hypothesis.}
+Correct branch prediction under crowded conditions requires learning many-body interaction structure rather than merely following static geometry.
+
+\begin{equation}
+P
+\left(
+b_i
+\mid
+\mathcal{S}_t
+\right)
+\neq
+P
+\left(
+b_i
+\mid
+\x_i,\Omega
+\right).
+\end{equation}
+
+\paragraph{H7: Representation reorganization hypothesis.}
+Geometry-aware training may alter inter-droplet attention structure even when geometry is introduced only through the loss.
+
+\begin{equation}
+p
+\left(
+a_{ij}
+\mid
+\Mgeom
+\right)
+\neq
+p
+\left(
+a_{ij}
+\mid
+\Mmark
+\right).
+\end{equation}
+
+This would indicate that a physical constraint on predicted outputs reorganizes the learned internal many-body representation.
+
+\section{Conclusion}
+
+The three trained rollout models form a controlled experiment on the information content of temporal history, instantaneous many-body state, and explicit geometric admissibility.
+
+The primary analysis should not be framed as
+
+\begin{equation}
+\text{Which model has the lowest RMSE?}
+\end{equation}
+
+Instead, the comparison should ask
+
+\begin{equation}
+\text{What information is each model using to construct a stable approximation of the droplet dynamics?}
+\end{equation}
+
+The initial five-figure analysis establishes global rollout accuracy, physical admissibility, directional error structure, and sensitivity to deformation and interaction proximity. The results of that analysis should then determine whether collision-aligned dynamics, branch-choice prediction, or attention structure becomes the next priority.
+
+The most scientifically consequential possible result is a separation of temporal history into two roles:
+
+\begin{equation}
+\boxed{
+\text{temporal history}
+\longrightarrow
+\underbrace{\text{implicit geometry}}_{\text{replaceable by geometric prior}}
++
+\underbrace{\text{dynamical memory}}_{\text{potentially encoded by morphology}}.
+}
+\end{equation}
+
+If supported by the three-model comparison, this would transform the Markovian model's unexpectedly strong performance from an empirical curiosity into a mechanistic result about the effective state representation of confined many-droplet dynamics.
+
+\end{document}
