@@ -21,6 +21,17 @@ from models.canonical_rollout_transformer import CanonicalRolloutTransformer
 import train_canonical_rollout_transformer as history_rollout
 import train_markovian_rollout_transformer as markovian_rollout
 from utils.channel_mask import read_centerline_csv
+from utils.geometry_loss import (
+    compute_ellipse_outside_fraction,
+    compute_ellipse_outside_fraction_torch,
+    run_sanity_tests as run_geometry_loss_sanity_tests,
+)
+from train_geometry_aware_markovian_rollout import (
+    CHANNEL_MASK_PATH as TRAINING_CHANNEL_MASK_PATH,
+    DETECTIONS_CSV_PATH as TRAINING_DETECTIONS_CSV_PATH,
+    GEOMETRY_TOLERANCE,
+    FutureBBoxLookup,
+)
 
 
 DEFAULT_NPZ_PATH = Path("outputs/processed/2/canonical_dataset.npz")
@@ -35,6 +46,8 @@ DEFAULT_GEOMETRY_AWARE_CHECKPOINT = Path(
     "outputs/models/train_geometry_aware_markovian_rollout/geometry_aware_markovian_rollout_best.pt"
 )
 DEFAULT_CENTERLINE_CSV = Path("centerlines.csv")
+DEFAULT_CHANNEL_MASK_PATH = Path(TRAINING_CHANNEL_MASK_PATH)
+DEFAULT_DETECTIONS_CSV_PATH = Path(TRAINING_DETECTIONS_CSV_PATH)
 
 ROLLOUT_HORIZON = 50
 MAX_DROPLETS = 64
@@ -139,6 +152,69 @@ class TangentEstimate:
     branch_distance_margin: float
     branch_relative_margin: float
     status: str
+
+
+@dataclass
+class ChannelAdmissibilityContext:
+    window_id: np.ndarray
+    rollout_start_frame: np.ndarray
+    track_ids: np.ndarray
+    future_frame: np.ndarray
+    true_position: np.ndarray
+    bbox_w: np.ndarray
+    bbox_h: np.ndarray
+    bbox_valid: np.ndarray
+    geometry_valid_mask: np.ndarray
+    true_outside_fraction: np.ndarray
+    global_count: np.ndarray
+    bbox_lookup_coverage: float
+    bbox_missing_count: int
+    bbox_candidate_count: int
+    channel_mask_path: Path
+    detections_csv_path: Path
+
+
+@dataclass
+class ChannelAdmissibilitySufficientStats:
+    sum_outside: np.ndarray
+    count: np.ndarray
+    count_viol_2pct: np.ndarray
+    count_any_viol: np.ndarray
+    count_viol_10pct: np.ndarray
+    sum_excess: np.ndarray
+    sum_penalty_equivalent: np.ndarray
+    global_count: np.ndarray
+
+
+@dataclass
+class ChannelAdmissibilityMetricCurves:
+    mean_outside_fraction: np.ndarray
+    median_outside_fraction: np.ndarray
+    violation_rate_2pct: np.ndarray
+    any_violation_rate: np.ndarray
+    violation_rate_10pct: np.ndarray
+    mean_excess_outside_fraction: np.ndarray
+    mean_geometry_penalty_equivalent: np.ndarray
+    true_mean_outside_fraction: np.ndarray
+    true_violation_rate_2pct: np.ndarray
+    true_violation_rate_10pct: np.ndarray
+    excess_mean_outside_fraction_vs_truth: np.ndarray
+    excess_violation_rate_2pct_vs_truth: np.ndarray
+    n_geometry_valid_samples: np.ndarray
+    geometry_valid_fraction: np.ndarray
+
+
+@dataclass
+class TrajectoryAdmissibilityMetrics:
+    n_evaluable_trajectories: int
+    n_trajectories_with_violation: int
+    trajectory_violation_fraction: float
+    mean_first_violation_step: float
+    median_first_violation_step: float
+    n_violation_episodes: int
+    mean_violation_episode_duration: float
+    median_violation_episode_duration: float
+    persistent_violation_fraction: float
 
 
 class AlignedRolloutWindowDataset(Dataset):
@@ -396,6 +472,12 @@ class RolloutModelComparator:
         self.directional_stats: dict[str, DirectionalSufficientStats] = {}
         self.directional_metrics: dict[str, DirectionalMetricCurves] = {}
         self.directional_bootstrap: dict[str, dict[str, np.ndarray]] = {}
+        self.channel_context: ChannelAdmissibilityContext | None = None
+        self.channel_outside_fraction: dict[str, np.ndarray] = {}
+        self.channel_stats: dict[str, ChannelAdmissibilitySufficientStats] = {}
+        self.channel_metrics: dict[str, ChannelAdmissibilityMetricCurves] = {}
+        self.channel_bootstrap: dict[str, dict[str, np.ndarray]] = {}
+        self.channel_trajectory_metrics: dict[str, TrajectoryAdmissibilityMetrics] = {}
 
     def run_inference(self) -> dict[str, RolloutPrediction]:
         print("Building aligned validation rollout windows...", flush=True)
@@ -592,6 +674,117 @@ class RolloutModelComparator:
             zero_line=True,
         )
         return tangential, normal, bias
+
+    def compute_channel_admissibility_metrics(
+        self,
+        channel_mask_path: Path,
+        detections_csv_path: Path,
+        tolerance: float = GEOMETRY_TOLERANCE,
+    ) -> None:
+        if not self.predictions:
+            raise RuntimeError("No predictions available for channel admissibility analysis.")
+        if self.bootstrap_indices is None:
+            self.bootstrap_metrics()
+
+        reference = next(iter(self.predictions.values()))
+        print("Building common channel footprint context...", flush=True)
+        self.channel_context = build_channel_admissibility_context(
+            reference=reference,
+            channel_mask_path=channel_mask_path,
+            detections_csv_path=detections_csv_path,
+        )
+        summarize_channel_context(self.channel_context, tolerance=tolerance)
+
+        true_stats = compute_channel_admissibility_sufficient_stats(
+            self.channel_context.true_outside_fraction,
+            self.channel_context.geometry_valid_mask,
+            self.channel_context.global_count,
+            tolerance=tolerance,
+        )
+        true_curves = channel_admissibility_metrics_from_stats(
+            true_stats,
+            self.channel_context.true_outside_fraction,
+            self.channel_context.geometry_valid_mask,
+            true_stats,
+            self.channel_context.true_outside_fraction,
+            self.channel_context.geometry_valid_mask,
+            tolerance=tolerance,
+        )
+
+        print("Computing predicted channel admissibility metrics...", flush=True)
+        for model_name, prediction in self.predictions.items():
+            outside = compute_model_outside_fraction(prediction, self.channel_context)
+            stats = compute_channel_admissibility_sufficient_stats(
+                outside,
+                self.channel_context.geometry_valid_mask,
+                self.channel_context.global_count,
+                tolerance=tolerance,
+            )
+            curves = channel_admissibility_metrics_from_stats(
+                stats,
+                outside,
+                self.channel_context.geometry_valid_mask,
+                true_stats,
+                self.channel_context.true_outside_fraction,
+                self.channel_context.geometry_valid_mask,
+                tolerance=tolerance,
+            )
+            self.channel_outside_fraction[model_name] = outside
+            self.channel_stats[model_name] = stats
+            self.channel_metrics[model_name] = curves
+            self.channel_bootstrap[model_name] = bootstrap_channel_admissibility_metrics(stats, self.bootstrap_indices)
+            self.channel_trajectory_metrics[model_name] = compute_trajectory_admissibility_metrics(
+                outside,
+                self.channel_context.geometry_valid_mask,
+                tolerance=tolerance,
+            )
+            print(f"  channel admissibility complete for '{model_name}'", flush=True)
+
+        validate_common_channel_masks(self.predictions, self.channel_context)
+        validate_channel_sanity_checks(self.channel_context)
+
+    def save_channel_admissibility_outputs(self) -> tuple[Path, Path, Path]:
+        csv_path = self.output_dir / "channel_admissibility_metrics.csv"
+        trajectory_csv_path = self.output_dir / "channel_admissibility_trajectory_metrics.csv"
+        data_path = self.output_dir / "channel_admissibility_data.npz"
+        write_channel_admissibility_metrics_csv(csv_path, self.channel_metrics, self.channel_bootstrap)
+        write_channel_trajectory_metrics_csv(trajectory_csv_path, self.channel_trajectory_metrics)
+        save_channel_admissibility_data(
+            data_path,
+            self.channel_context,
+            self.channel_outside_fraction,
+        )
+        return csv_path, trajectory_csv_path, data_path
+
+    def plot_channel_admissibility_metrics(self) -> tuple[tuple[Path, Path], tuple[Path, Path], tuple[Path, Path]]:
+        mean_plot = plot_channel_metric(
+            output_dir=self.output_dir,
+            metrics=self.channel_metrics,
+            bootstrap=self.channel_bootstrap,
+            metric_name="mean_outside_fraction",
+            truth_metric_name="true_mean_outside_fraction",
+            ylabel="Mean footprint outside channel fraction",
+            stem="mean_outside_fraction_vs_rollout_step",
+        )
+        rate_plot = plot_channel_metric(
+            output_dir=self.output_dir,
+            metrics=self.channel_metrics,
+            bootstrap=self.channel_bootstrap,
+            metric_name="violation_rate_2pct",
+            truth_metric_name="true_violation_rate_2pct",
+            ylabel="Fraction of footprints with >2% outside-channel area",
+            stem="channel_violation_rate_2pct_vs_rollout_step",
+        )
+        penalty_plot = plot_channel_metric(
+            output_dir=self.output_dir,
+            metrics=self.channel_metrics,
+            bootstrap=self.channel_bootstrap,
+            metric_name="mean_geometry_penalty_equivalent",
+            truth_metric_name=None,
+            ylabel="Mean geometry penalty equivalent",
+            stem="geometry_penalty_equivalent_vs_rollout_step",
+        )
+        return mean_plot, rate_plot, penalty_plot
 
     def save_metrics(self) -> tuple[Path, Path]:
         stepwise_path = self.output_dir / "stepwise_metrics.csv"
@@ -882,6 +1075,150 @@ def write_integrated_metrics_csv(
             )
 
 
+def write_channel_admissibility_metrics_csv(
+    path: Path,
+    metrics: dict[str, ChannelAdmissibilityMetricCurves],
+    bootstrap: dict[str, dict[str, np.ndarray]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "model", "rollout_step",
+        "mean_outside_fraction", "mean_outside_fraction_ci_low", "mean_outside_fraction_ci_high",
+        "median_outside_fraction",
+        "violation_rate_2pct", "violation_rate_2pct_ci_low", "violation_rate_2pct_ci_high",
+        "any_violation_rate", "any_violation_rate_ci_low", "any_violation_rate_ci_high",
+        "violation_rate_10pct", "violation_rate_10pct_ci_low", "violation_rate_10pct_ci_high",
+        "mean_excess_outside_fraction", "mean_excess_outside_fraction_ci_low", "mean_excess_outside_fraction_ci_high",
+        "mean_geometry_penalty_equivalent", "mean_geometry_penalty_equivalent_ci_low", "mean_geometry_penalty_equivalent_ci_high",
+        "true_mean_outside_fraction", "true_violation_rate_2pct", "true_violation_rate_10pct",
+        "excess_mean_outside_fraction_vs_truth", "excess_violation_rate_2pct_vs_truth",
+        "n_geometry_valid_samples", "geometry_valid_fraction",
+    ]
+    ci_metrics = [
+        "mean_outside_fraction",
+        "violation_rate_2pct",
+        "any_violation_rate",
+        "violation_rate_10pct",
+        "mean_excess_outside_fraction",
+        "mean_geometry_penalty_equivalent",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for model_name, curves in metrics.items():
+            ci = {name: percentile_ci(bootstrap[model_name][name]) for name in ci_metrics}
+            for step_index in range(len(curves.mean_outside_fraction)):
+                row = {
+                    "model": model_name,
+                    "rollout_step": step_index + 1,
+                    "median_outside_fraction": curves.median_outside_fraction[step_index],
+                    "true_mean_outside_fraction": curves.true_mean_outside_fraction[step_index],
+                    "true_violation_rate_2pct": curves.true_violation_rate_2pct[step_index],
+                    "true_violation_rate_10pct": curves.true_violation_rate_10pct[step_index],
+                    "excess_mean_outside_fraction_vs_truth": curves.excess_mean_outside_fraction_vs_truth[step_index],
+                    "excess_violation_rate_2pct_vs_truth": curves.excess_violation_rate_2pct_vs_truth[step_index],
+                    "n_geometry_valid_samples": int(curves.n_geometry_valid_samples[step_index]),
+                    "geometry_valid_fraction": curves.geometry_valid_fraction[step_index],
+                }
+                for name in ci_metrics:
+                    values = getattr(curves, name)
+                    low, high = ci[name]
+                    row[name] = values[step_index]
+                    row[f"{name}_ci_low"] = low[step_index]
+                    row[f"{name}_ci_high"] = high[step_index]
+                writer.writerow(row)
+
+
+def write_channel_trajectory_metrics_csv(
+    path: Path,
+    metrics: dict[str, TrajectoryAdmissibilityMetrics],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fieldnames = [
+        "model",
+        "n_evaluable_trajectories",
+        "n_trajectories_with_violation",
+        "trajectory_violation_fraction",
+        "mean_first_violation_step",
+        "median_first_violation_step",
+        "n_violation_episodes",
+        "mean_violation_episode_duration",
+        "median_violation_episode_duration",
+        "persistent_violation_fraction",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=fieldnames)
+        writer.writeheader()
+        for model_name, item in metrics.items():
+            writer.writerow({"model": model_name, **item.__dict__})
+
+
+def save_channel_admissibility_data(
+    path: Path,
+    context: ChannelAdmissibilityContext | None,
+    outside_fraction_by_model: dict[str, np.ndarray],
+) -> None:
+    if context is None:
+        raise RuntimeError("Channel admissibility context has not been computed.")
+    arrays: dict[str, np.ndarray] = {
+        "window_id": context.window_id,
+        "rollout_start_frame": context.rollout_start_frame,
+        "track_ids": context.track_ids,
+        "future_frame": context.future_frame,
+        "bbox_w": context.bbox_w.astype(np.float32),
+        "bbox_h": context.bbox_h.astype(np.float32),
+        "bbox_valid": context.bbox_valid,
+        "geometry_valid_mask": context.geometry_valid_mask,
+        "true_outside_fraction": context.true_outside_fraction.astype(np.float32),
+        "channel_mask_path": np.asarray(str(context.channel_mask_path), dtype="U512"),
+        "detections_csv_path": np.asarray(str(context.detections_csv_path), dtype="U512"),
+        "model_names": np.asarray(list(outside_fraction_by_model), dtype=str),
+    }
+    for model_name, outside in outside_fraction_by_model.items():
+        arrays[f"{model_name}__outside_fraction"] = outside.astype(np.float32)
+        arrays[f"{model_name}__violation_2pct"] = (outside > GEOMETRY_TOLERANCE) & context.geometry_valid_mask
+        arrays[f"{model_name}__violation_10pct"] = (outside > 0.10) & context.geometry_valid_mask
+    np.savez_compressed(path, **arrays)
+
+
+def plot_channel_metric(
+    output_dir: Path,
+    metrics: dict[str, ChannelAdmissibilityMetricCurves],
+    bootstrap: dict[str, dict[str, np.ndarray]],
+    metric_name: str,
+    truth_metric_name: str | None,
+    ylabel: str,
+    stem: str,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig, ax = plt.subplots(figsize=(4.8, 3.2), constrained_layout=True)
+    steps = None
+    reference_truth = None
+    for model_name, curves in metrics.items():
+        values = getattr(curves, metric_name)
+        steps = np.arange(1, len(values) + 1)
+        low, high = percentile_ci(bootstrap[model_name][metric_name])
+        line = ax.plot(steps, values, linewidth=1.8, label=model_name)[0]
+        ax.fill_between(steps, low, high, color=line.get_color(), alpha=0.18, linewidth=0)
+        if truth_metric_name is not None and reference_truth is None:
+            reference_truth = getattr(curves, truth_metric_name)
+    if reference_truth is not None and steps is not None:
+        ax.plot(steps, reference_truth, color="0.20", linewidth=1.4, linestyle="--", label="True footprint baseline")
+    ax.set_xlabel("Rollout step")
+    ax.set_ylabel(ylabel)
+    ax.set_xlim(1, int(steps[-1]) if steps is not None else ROLLOUT_HORIZON)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", color="0.9", linewidth=0.6)
+    ax.legend(frameon=False)
+    pdf_path = output_dir / f"{stem}.pdf"
+    png_path = output_dir / f"{stem}.png"
+    fig.savefig(pdf_path)
+    fig.savefig(png_path, dpi=300)
+    plt.close(fig)
+    return pdf_path, png_path
+
+
 def plot_stepwise_metric(
     output_dir: Path,
     stepwise_metrics: dict[str, StepwiseMetricCurves],
@@ -1126,7 +1463,7 @@ class CenterlineTangentEstimator:
 
 def check_directional_basis(tangent: np.ndarray, normal: np.ndarray, valid: np.ndarray) -> None:
     if not valid.any():
-        raise ValueError("No tangent-valid samples were found.")
+        raise ValueError("No axis-valid samples were found.")
     t = tangent[valid].astype(np.float64)
     n = normal[valid].astype(np.float64)
     if not np.allclose(np.linalg.norm(t, axis=1), 1.0, atol=1.0e-4):
@@ -1227,6 +1564,432 @@ def bootstrap_directional_metrics(
         output["normal_bias"][replicate] = curves.normal_bias
         output["anisotropy_ratio"][replicate] = curves.anisotropy_ratio
     return output
+
+
+def load_channel_mask_bool(mask_path: Path) -> np.ndarray:
+    mask = np.load(mask_path)
+    if mask.ndim != 2:
+        raise ValueError(f"Channel mask must be 2D, got {mask.shape}.")
+    mask = mask.astype(bool)
+    if not mask.any():
+        raise ValueError(f"Channel mask has no admissible pixels: {mask_path}")
+    return mask
+
+
+def compute_ellipse_outside_fraction_vectorized(
+    positions: np.ndarray,
+    bbox_w: np.ndarray,
+    bbox_h: np.ndarray,
+    channel_mask: np.ndarray,
+    valid_mask: np.ndarray,
+    chunk_size: int = 8192,
+) -> np.ndarray:
+    """Vectorized equivalent of compute_ellipse_outside_fraction for many ellipses."""
+
+    output = np.full(valid_mask.shape, np.nan, dtype=np.float32)
+    flat_valid = np.flatnonzero(valid_mask.reshape(-1))
+    if flat_valid.size == 0:
+        return output
+
+    flat_positions = positions.reshape(-1, 2)
+    flat_w = bbox_w.reshape(-1).astype(np.float64)
+    flat_h = bbox_h.reshape(-1).astype(np.float64)
+    height, width = channel_mask.shape
+    max_axis = float(max(np.nanmax(flat_w[flat_valid]) / 2.0, np.nanmax(flat_h[flat_valid]) / 2.0))
+    radius = int(np.ceil(max_axis)) + 3
+    offsets = np.arange(-radius, radius + 1, dtype=np.float64)
+    offset_x, offset_y = np.meshgrid(offsets, offsets)
+    offset_x = offset_x.reshape(1, -1)
+    offset_y = offset_y.reshape(1, -1)
+
+    flat_output = output.reshape(-1)
+    for start in range(0, flat_valid.size, chunk_size):
+        indices = flat_valid[start : start + chunk_size]
+        cx = flat_positions[indices, 0].astype(np.float64)
+        cy = flat_positions[indices, 1].astype(np.float64)
+        bw = flat_w[indices]
+        bh = flat_h[indices]
+        finite = np.isfinite(cx) & np.isfinite(cy) & np.isfinite(bw) & np.isfinite(bh) & (bw > 0) & (bh > 0)
+        if not finite.all():
+            raise ValueError("Non-finite or non-positive ellipse inputs under geometry-valid mask.")
+        axis_a = bw / 2.0
+        axis_b = bh / 2.0
+        base_x = np.floor(cx)[:, None]
+        base_y = np.floor(cy)[:, None]
+        grid_x = base_x + offset_x
+        grid_y = base_y + offset_y
+        ellipse = ((grid_x - cx[:, None]) / axis_a[:, None]) ** 2 + ((grid_y - cy[:, None]) / axis_b[:, None]) ** 2 <= 1.0
+        total = ellipse.sum(axis=1)
+        in_image = (
+            ellipse
+            & (grid_x >= 0)
+            & (grid_x < width)
+            & (grid_y >= 0)
+            & (grid_y < height)
+        )
+        clipped_x = np.clip(grid_x, 0, width - 1).astype(np.int64)
+        clipped_y = np.clip(grid_y, 0, height - 1).astype(np.int64)
+        inside = in_image & channel_mask[clipped_y, clipped_x]
+        inside_count = inside.sum(axis=1)
+        flat_output[indices] = np.where(total > 0, 1.0 - inside_count / total, 1.0).astype(np.float32)
+    return output
+
+
+def build_channel_admissibility_context(
+    reference: RolloutPrediction,
+    channel_mask_path: Path,
+    detections_csv_path: Path,
+) -> ChannelAdmissibilityContext:
+    channel_mask_path = Path(channel_mask_path)
+    detections_csv_path = Path(detections_csv_path)
+    channel_mask = load_channel_mask_bool(channel_mask_path)
+    bbox_lookup = FutureBBoxLookup(detections_csv_path)
+
+    n_windows, horizon, max_droplets = reference.valid_mask.shape
+    future_frame = reference.rollout_start_frame[:, None] + np.arange(horizon, dtype=np.int64)[None, :]
+    bbox_w = np.zeros((n_windows, horizon, max_droplets), dtype=np.float32)
+    bbox_h = np.zeros_like(bbox_w)
+    bbox_valid = np.zeros((n_windows, horizon, max_droplets), dtype=bool)
+
+    metric_mask = reference.metric_mask
+    candidate_mask = metric_mask & (reference.track_ids[:, None, :] >= 0)
+    candidate_count = int(candidate_mask.sum())
+    missing_count = 0
+    for window_index, step_index, slot_index in zip(*np.nonzero(candidate_mask)):
+        frame = int(future_frame[window_index, step_index])
+        track_id = int(reference.track_ids[window_index, slot_index])
+        lookup = bbox_lookup.lookup(frame, track_id)
+        if lookup is None:
+            missing_count += 1
+            continue
+        width, height = lookup
+        if not (np.isfinite(width) and np.isfinite(height) and width > 0 and height > 0):
+            missing_count += 1
+            continue
+        bbox_w[window_index, step_index, slot_index] = float(width)
+        bbox_h[window_index, step_index, slot_index] = float(height)
+        bbox_valid[window_index, step_index, slot_index] = True
+
+    candidate_geometry_mask = metric_mask & bbox_valid & np.isfinite(reference.true_position).all(axis=-1)
+    true_outside = compute_ellipse_outside_fraction_vectorized(
+        reference.true_position,
+        bbox_w,
+        bbox_h,
+        channel_mask,
+        candidate_geometry_mask,
+    )
+    geometry_valid = candidate_geometry_mask & np.isfinite(true_outside)
+    coverage = float(bbox_valid[metric_mask].sum() / max(candidate_count, 1))
+    global_count = metric_mask.sum(axis=2).astype(np.int64)
+    if not np.all((true_outside[geometry_valid] >= -1.0e-7) & (true_outside[geometry_valid] <= 1.0 + 1.0e-7)):
+        raise ValueError("True outside fractions outside [0, 1].")
+
+    return ChannelAdmissibilityContext(
+        window_id=reference.window_id,
+        rollout_start_frame=reference.rollout_start_frame,
+        track_ids=reference.track_ids,
+        future_frame=future_frame,
+        true_position=reference.true_position.astype(np.float32),
+        bbox_w=bbox_w,
+        bbox_h=bbox_h,
+        bbox_valid=bbox_valid,
+        geometry_valid_mask=geometry_valid,
+        true_outside_fraction=true_outside,
+        global_count=global_count,
+        bbox_lookup_coverage=coverage,
+        bbox_missing_count=missing_count,
+        bbox_candidate_count=candidate_count,
+        channel_mask_path=channel_mask_path,
+        detections_csv_path=detections_csv_path,
+    )
+
+
+def compute_model_outside_fraction(
+    prediction: RolloutPrediction,
+    context: ChannelAdmissibilityContext,
+) -> np.ndarray:
+    channel_mask = load_channel_mask_bool(context.channel_mask_path)
+    outside = compute_ellipse_outside_fraction_vectorized(
+        prediction.pred_position,
+        context.bbox_w,
+        context.bbox_h,
+        channel_mask,
+        context.geometry_valid_mask,
+    )
+    if np.any(outside[context.geometry_valid_mask] < -1.0e-7) or np.any(outside[context.geometry_valid_mask] > 1.0 + 1.0e-7):
+        raise ValueError(f"{prediction.model_name}: outside fraction outside [0, 1].")
+    return outside
+
+
+def compute_channel_admissibility_sufficient_stats(
+    outside_fraction: np.ndarray,
+    geometry_mask: np.ndarray,
+    global_count: np.ndarray,
+    tolerance: float,
+) -> ChannelAdmissibilitySufficientStats:
+    values = np.where(geometry_mask, outside_fraction, 0.0).astype(np.float64)
+    if not np.isfinite(outside_fraction[geometry_mask]).all():
+        raise ValueError("Non-finite outside fraction under geometry-valid mask.")
+    if np.any(outside_fraction[geometry_mask] < -1.0e-7) or np.any(outside_fraction[geometry_mask] > 1.0 + 1.0e-7):
+        raise ValueError("Outside fraction outside [0, 1] under geometry-valid mask.")
+    excess = np.maximum(values - float(tolerance), 0.0)
+    return ChannelAdmissibilitySufficientStats(
+        sum_outside=values.sum(axis=2),
+        count=geometry_mask.sum(axis=2).astype(np.int64),
+        count_viol_2pct=((outside_fraction > float(tolerance)) & geometry_mask).sum(axis=2).astype(np.int64),
+        count_any_viol=((outside_fraction > 0.0) & geometry_mask).sum(axis=2).astype(np.int64),
+        count_viol_10pct=((outside_fraction > 0.10) & geometry_mask).sum(axis=2).astype(np.int64),
+        sum_excess=np.where(geometry_mask, excess, 0.0).sum(axis=2),
+        sum_penalty_equivalent=np.where(geometry_mask, excess**2, 0.0).sum(axis=2),
+        global_count=global_count.astype(np.int64),
+    )
+
+
+def _safe_divide(numerator: np.ndarray, denominator: np.ndarray) -> np.ndarray:
+    return np.divide(
+        numerator,
+        denominator,
+        out=np.full_like(np.asarray(numerator, dtype=np.float64), np.nan, dtype=np.float64),
+        where=np.asarray(denominator) > 0,
+    )
+
+
+def _stepwise_median(values: np.ndarray, mask: np.ndarray) -> np.ndarray:
+    horizon = values.shape[1]
+    output = np.full((horizon,), np.nan, dtype=np.float64)
+    for step_index in range(horizon):
+        step_values = values[:, step_index, :][mask[:, step_index, :]]
+        if step_values.size:
+            output[step_index] = float(np.median(step_values))
+    return output
+
+
+def channel_admissibility_metrics_from_stats(
+    stats: ChannelAdmissibilitySufficientStats,
+    outside_fraction: np.ndarray,
+    geometry_mask: np.ndarray,
+    true_stats: ChannelAdmissibilitySufficientStats,
+    true_outside_fraction: np.ndarray,
+    true_geometry_mask: np.ndarray,
+    tolerance: float,
+) -> ChannelAdmissibilityMetricCurves:
+    count = stats.count.sum(axis=0)
+    true_count = true_stats.count.sum(axis=0)
+    global_count = stats.global_count.sum(axis=0)
+    mean_outside = _safe_divide(stats.sum_outside.sum(axis=0), count)
+    true_mean = _safe_divide(true_stats.sum_outside.sum(axis=0), true_count)
+    viol_2 = _safe_divide(stats.count_viol_2pct.sum(axis=0), count)
+    true_viol_2 = _safe_divide(true_stats.count_viol_2pct.sum(axis=0), true_count)
+    viol_10 = _safe_divide(stats.count_viol_10pct.sum(axis=0), count)
+    true_viol_10 = _safe_divide(true_stats.count_viol_10pct.sum(axis=0), true_count)
+    return ChannelAdmissibilityMetricCurves(
+        mean_outside_fraction=mean_outside,
+        median_outside_fraction=_stepwise_median(outside_fraction, geometry_mask),
+        violation_rate_2pct=viol_2,
+        any_violation_rate=_safe_divide(stats.count_any_viol.sum(axis=0), count),
+        violation_rate_10pct=viol_10,
+        mean_excess_outside_fraction=_safe_divide(stats.sum_excess.sum(axis=0), count),
+        mean_geometry_penalty_equivalent=_safe_divide(stats.sum_penalty_equivalent.sum(axis=0), count),
+        true_mean_outside_fraction=true_mean,
+        true_violation_rate_2pct=true_viol_2,
+        true_violation_rate_10pct=true_viol_10,
+        excess_mean_outside_fraction_vs_truth=mean_outside - true_mean,
+        excess_violation_rate_2pct_vs_truth=viol_2 - true_viol_2,
+        n_geometry_valid_samples=count.astype(np.int64),
+        geometry_valid_fraction=_safe_divide(count, global_count),
+    )
+
+
+def bootstrap_channel_admissibility_metrics(
+    stats: ChannelAdmissibilitySufficientStats,
+    bootstrap_indices: np.ndarray,
+) -> dict[str, np.ndarray]:
+    n_bootstrap, _ = bootstrap_indices.shape
+    horizon = stats.count.shape[1]
+    names = [
+        "mean_outside_fraction",
+        "violation_rate_2pct",
+        "any_violation_rate",
+        "violation_rate_10pct",
+        "mean_excess_outside_fraction",
+        "mean_geometry_penalty_equivalent",
+    ]
+    output = {name: np.empty((n_bootstrap, horizon), dtype=np.float64) for name in names}
+    for replicate, indices in enumerate(bootstrap_indices):
+        count = stats.count[indices].sum(axis=0)
+        output["mean_outside_fraction"][replicate] = _safe_divide(stats.sum_outside[indices].sum(axis=0), count)
+        output["violation_rate_2pct"][replicate] = _safe_divide(stats.count_viol_2pct[indices].sum(axis=0), count)
+        output["any_violation_rate"][replicate] = _safe_divide(stats.count_any_viol[indices].sum(axis=0), count)
+        output["violation_rate_10pct"][replicate] = _safe_divide(stats.count_viol_10pct[indices].sum(axis=0), count)
+        output["mean_excess_outside_fraction"][replicate] = _safe_divide(stats.sum_excess[indices].sum(axis=0), count)
+        output["mean_geometry_penalty_equivalent"][replicate] = _safe_divide(
+            stats.sum_penalty_equivalent[indices].sum(axis=0),
+            count,
+        )
+    return output
+
+
+def compute_trajectory_admissibility_metrics(
+    outside_fraction: np.ndarray,
+    geometry_mask: np.ndarray,
+    tolerance: float,
+) -> TrajectoryAdmissibilityMetrics:
+    first_steps = []
+    episode_durations = []
+    persistent_count = 0
+    n_evaluable = 0
+    n_violating = 0
+    n_windows, _, max_droplets = geometry_mask.shape
+    for window_index in range(n_windows):
+        for slot_index in range(max_droplets):
+            valid_steps = np.flatnonzero(geometry_mask[window_index, :, slot_index])
+            if valid_steps.size == 0:
+                continue
+            n_evaluable += 1
+            violations = outside_fraction[window_index, valid_steps, slot_index] > float(tolerance)
+            if not violations.any():
+                continue
+            n_violating += 1
+            first_local = int(np.flatnonzero(violations)[0])
+            first_step = int(valid_steps[first_local] + 1)
+            first_steps.append(first_step)
+            if violations[first_local:].all():
+                persistent_count += 1
+
+            run_length = 0
+            for is_violation in violations:
+                if is_violation:
+                    run_length += 1
+                elif run_length:
+                    episode_durations.append(run_length)
+                    run_length = 0
+            if run_length:
+                episode_durations.append(run_length)
+
+    return TrajectoryAdmissibilityMetrics(
+        n_evaluable_trajectories=n_evaluable,
+        n_trajectories_with_violation=n_violating,
+        trajectory_violation_fraction=n_violating / n_evaluable if n_evaluable else float("nan"),
+        mean_first_violation_step=float(np.mean(first_steps)) if first_steps else float("nan"),
+        median_first_violation_step=float(np.median(first_steps)) if first_steps else float("nan"),
+        n_violation_episodes=len(episode_durations),
+        mean_violation_episode_duration=float(np.mean(episode_durations)) if episode_durations else float("nan"),
+        median_violation_episode_duration=float(np.median(episode_durations)) if episode_durations else float("nan"),
+        persistent_violation_fraction=persistent_count / n_violating if n_violating else float("nan"),
+    )
+
+
+def summarize_channel_context(context: ChannelAdmissibilityContext, tolerance: float) -> None:
+    total_metric = int(context.global_count.sum())
+    geometry_count = int(context.geometry_valid_mask.sum())
+    print(f"Channel mask path: {context.channel_mask_path}", flush=True)
+    print(f"BBox source path: {context.detections_csv_path}", flush=True)
+    print("BBox lookup key: (frame, track_id) -> (bbox_w, bbox_h)", flush=True)
+    print("Future frame convention: future_frame = rollout_start_frame + zero_based_rollout_step", flush=True)
+    print(
+        f"BBox coverage under global metric mask: "
+        f"{context.bbox_lookup_coverage:.6f} "
+        f"({context.bbox_candidate_count - context.bbox_missing_count}/{context.bbox_candidate_count})",
+        flush=True,
+    )
+    print(
+        f"Geometry-valid samples: {geometry_count}/{total_metric} "
+        f"({geometry_count / max(total_metric, 1):.6f})",
+        flush=True,
+    )
+    true_values = context.true_outside_fraction[context.geometry_valid_mask]
+    if true_values.size:
+        print(
+            "True footprint baseline outside_fraction "
+            f"mean={float(np.mean(true_values)):.6f} "
+            f"p50={float(np.median(true_values)):.6f} "
+            f"rate>{tolerance:.2f}={float(np.mean(true_values > tolerance)):.6f} "
+            f"rate>0.10={float(np.mean(true_values > 0.10)):.6f}",
+            flush=True,
+        )
+
+
+def validate_common_channel_masks(
+    predictions: dict[str, RolloutPrediction],
+    context: ChannelAdmissibilityContext,
+) -> None:
+    reference = next(iter(predictions.values()))
+    for model_name, prediction in predictions.items():
+        np.testing.assert_array_equal(prediction.window_id, context.window_id)
+        np.testing.assert_array_equal(prediction.rollout_start_frame, context.rollout_start_frame)
+        np.testing.assert_array_equal(prediction.track_ids, context.track_ids)
+        np.testing.assert_array_equal(prediction.metric_mask, reference.metric_mask)
+    print("Common geometry-valid mask reused across models: ok", flush=True)
+
+
+def validate_channel_sanity_checks(context: ChannelAdmissibilityContext) -> None:
+    sanity = run_geometry_loss_sanity_tests()
+    inside = sanity["all_true_overlap"]
+    outside = sanity["all_false_overlap"]
+    partial = sanity["boundary_crossing_overlap"]
+    if not (inside <= 1.0e-12 and outside >= 1.0 - 1.0e-12 and 0.0 < partial < 1.0):
+        raise AssertionError(f"Unexpected geometry sanity-test result: {sanity}")
+    compare_vectorized_scalar_geometry(context, max_samples=50)
+    compare_numpy_torch_geometry(context, max_samples=50)
+    print(
+        "Synthetic ellipse sanity: inside~0, outside~1, partial in (0,1): ok",
+        flush=True,
+    )
+
+
+def compare_vectorized_scalar_geometry(context: ChannelAdmissibilityContext, max_samples: int) -> None:
+    indices = list(zip(*np.nonzero(context.geometry_valid_mask)))[:max_samples]
+    if not indices:
+        return
+    channel_mask = load_channel_mask_bool(context.channel_mask_path)
+    diffs = []
+    for window_index, step_index, slot_index in indices:
+        x, y = context.true_position[window_index, step_index, slot_index]
+        width = float(context.bbox_w[window_index, step_index, slot_index])
+        height = float(context.bbox_h[window_index, step_index, slot_index])
+        scalar = compute_ellipse_outside_fraction(float(x), float(y), width, height, channel_mask)
+        vectorized = float(context.true_outside_fraction[window_index, step_index, slot_index])
+        diffs.append(abs(scalar - vectorized))
+    max_abs = float(np.max(diffs))
+    if max_abs > 1.0e-7:
+        raise AssertionError(f"Vectorized ellipse rasterizer differs from scalar helper: max_abs_diff={max_abs}")
+    print(
+        f"Vectorized rasterizer vs scalar helper on {len(indices)} samples: max_abs_diff={max_abs:.6g}",
+        flush=True,
+    )
+
+
+def compare_numpy_torch_geometry(context: ChannelAdmissibilityContext, max_samples: int) -> None:
+    indices = list(zip(*np.nonzero(context.geometry_valid_mask)))[:max_samples]
+    if not indices:
+        return
+    centroids = []
+    sizes = []
+    numpy_values = []
+    for window_index, step_index, slot_index in indices:
+        centroids.append(context.true_position[window_index, step_index, slot_index].tolist())
+        sizes.append([
+            context.bbox_w[window_index, step_index, slot_index],
+            context.bbox_h[window_index, step_index, slot_index],
+        ])
+        numpy_values.append(context.true_outside_fraction[window_index, step_index, slot_index])
+    channel_mask = torch.as_tensor(load_channel_mask_bool(context.channel_mask_path).astype(np.float32))
+    with torch.inference_mode():
+        torch_values = compute_ellipse_outside_fraction_torch(
+            torch.as_tensor(centroids, dtype=torch.float32),
+            torch.as_tensor(sizes, dtype=torch.float32),
+            channel_mask,
+            64,
+            64,
+        ).detach().cpu().numpy()
+    numpy_values = np.asarray(numpy_values, dtype=np.float32)
+    max_abs = float(np.max(np.abs(torch_values - numpy_values)))
+    mean_abs = float(np.mean(np.abs(torch_values - numpy_values)))
+    print(
+        f"NumPy exact rasterizer vs training torch helper on {len(indices)} samples: "
+        f"mean_abs_diff={mean_abs:.6f} max_abs_diff={max_abs:.6f}",
+        flush=True,
+    )
 
 
 def summarize_tangent_basis(basis: DirectionalBasis, metric_mask: np.ndarray) -> None:
@@ -1430,6 +2193,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--min-tangent-quality", type=float, default=3.0)
     parser.add_argument("--max-centerline-distance", type=float, default=30.0)
     parser.add_argument("--min-orientation-speed", type=float, default=1.0e-3)
+    parser.add_argument("--channel-mask", type=Path, default=DEFAULT_CHANNEL_MASK_PATH)
+    parser.add_argument("--detections-csv", type=Path, default=DEFAULT_DETECTIONS_CSV_PATH)
+    parser.add_argument("--geometry-tolerance", type=float, default=GEOMETRY_TOLERANCE)
     parser.add_argument(
         "--min-branch-distance-margin",
         type=float,
@@ -1443,6 +2209,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional relative nearest-vs-second-nearest branch margin threshold.",
     )
     parser.add_argument("--skip-directional", action="store_true")
+    parser.add_argument("--skip-channel-admissibility", action="store_true")
     parser.add_argument("--cpu", action="store_true")
     return parser.parse_args()
 
@@ -1475,6 +2242,8 @@ def main() -> None:
     velocity_pdf, velocity_png = comparator.plot_velocity_rmse()
     directional_csv = directional_data = None
     directional_plots = None
+    channel_csv = channel_trajectory_csv = channel_data = None
+    channel_plots = None
     if not args.skip_directional:
         comparator.compute_directional_metrics(
             centerline_csv=args.centerline_csv,
@@ -1487,6 +2256,14 @@ def main() -> None:
         )
         directional_csv, directional_data = comparator.save_directional_outputs()
         directional_plots = comparator.plot_directional_metrics()
+    if not args.skip_channel_admissibility:
+        comparator.compute_channel_admissibility_metrics(
+            channel_mask_path=args.channel_mask,
+            detections_csv_path=args.detections_csv,
+            tolerance=args.geometry_tolerance,
+        )
+        channel_csv, channel_trajectory_csv, channel_data = comparator.save_channel_admissibility_outputs()
+        channel_plots = comparator.plot_channel_admissibility_metrics()
 
     print("Models evaluated:")
     for model_name in comparator.predictions:
@@ -1507,6 +2284,13 @@ def main() -> None:
         print(f"  tangential RMSE plot: {directional_plots[0][0]}, {directional_plots[0][1]}")
         print(f"  normal RMSE plot: {directional_plots[1][0]}, {directional_plots[1][1]}")
         print(f"  tangential bias plot: {directional_plots[2][0]}, {directional_plots[2][1]}")
+    if channel_csv is not None:
+        print(f"  channel admissibility metrics: {channel_csv}")
+        print(f"  channel trajectory metrics: {channel_trajectory_csv}")
+        print(f"  channel admissibility data: {channel_data}")
+        print(f"  mean outside plot: {channel_plots[0][0]}, {channel_plots[0][1]}")
+        print(f"  2pct violation plot: {channel_plots[1][0]}, {channel_plots[1][1]}")
+        print(f"  geometry penalty equivalent plot: {channel_plots[2][0]}, {channel_plots[2][1]}")
 
 
 if __name__ == "__main__":
