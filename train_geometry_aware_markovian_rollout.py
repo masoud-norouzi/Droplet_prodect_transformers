@@ -24,12 +24,7 @@ DETECTIONS_CSV_PATH = "outputs/processed/2/tracked_features.csv"
 CHANNEL_MASK_PATH = "outputs/processed/2/channel_mask.npy"
 VIDEO_PATH = r"D:\Microfluidic loop projct\new loop experiments\confined droplets 2\2.avi"
 OUTPUT_DIR = "outputs/models/train_geometry_aware_markovian_rollout"
-BEST_CHECKPOINT_PATH = f"{OUTPUT_DIR}/geometry_aware_markovian_rollout_best.pt"
-BEST_GEOMETRY_CHECKPOINT_PATH = f"{OUTPUT_DIR}/geometry_aware_markovian_rollout_best_geometry.pt"
-LATEST_CHECKPOINT_PATH = f"{OUTPUT_DIR}/geometry_aware_markovian_rollout_latest.pt"
-CURVES_CSV_PATH = f"{OUTPUT_DIR}/geometry_aware_markovian_rollout_training_curves.csv"
-ANIMATION_DIR = f"{OUTPUT_DIR}/rollout_training_animations"
-VALIDATION_DIR = f"{OUTPUT_DIR}/validation"
+CHECKPOINT_STEM = "geometry_aware_markovian_rollout"
 
 T_HISTORY = 1
 ROLLOUT_HORIZON = 50
@@ -133,9 +128,13 @@ class GeometryAwareDataset(Dataset):
 
 def main() -> None:
     args = parse_args()
+    configure_output_paths(args)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print_startup_banner()
     print(f"Device: {device}")
+    print(f"Geometry loss weight: {args.geometry_loss_weight:.6g}")
+    print(f"Geometry loss weight tag: {args.geometry_loss_weight_tag}")
+    print(f"Output directory: {args.output_dir}")
 
     train_ds, val_ds, test_ds, normalization_stats = create_train_val_test_datasets(
         npz_path=args.npz_path,
@@ -210,7 +209,7 @@ def main() -> None:
             weights=weights,
             channel_mask=channel_mask,
             device=device,
-            output_dir=Path(VALIDATION_DIR),
+            output_dir=Path(args.validation_dir),
             args=args,
         )
         return
@@ -281,6 +280,8 @@ def main() -> None:
             "stride": args.stride,
             "geometry_tolerance": args.geometry_tolerance,
             "geometry_loss_weight": args.geometry_loss_weight,
+            "geometry_loss_weight_tag": args.geometry_loss_weight_tag,
+            "output_dir": args.output_dir,
             "channel_mask_path": args.channel_mask,
             "detections_csv": args.detections_csv,
             "geometry_num_samples_x": args.geometry_num_samples_x,
@@ -340,11 +341,13 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--stride", type=int, default=STRIDE)
     parser.add_argument("--log-every", type=int, default=LOG_EVERY_N_BATCHES)
     parser.add_argument("--animate-every", type=int, default=ANIMATE_EVERY_N_EPOCHS)
-    parser.add_argument("--best-checkpoint", default=BEST_CHECKPOINT_PATH)
-    parser.add_argument("--best-geometry-checkpoint", default=BEST_GEOMETRY_CHECKPOINT_PATH)
-    parser.add_argument("--latest-checkpoint", default=LATEST_CHECKPOINT_PATH)
-    parser.add_argument("--curves-csv", default=CURVES_CSV_PATH)
-    parser.add_argument("--animation-dir", default=ANIMATION_DIR)
+    parser.add_argument("--output-dir", default=None)
+    parser.add_argument("--best-checkpoint", default=None)
+    parser.add_argument("--best-geometry-checkpoint", default=None)
+    parser.add_argument("--latest-checkpoint", default=None)
+    parser.add_argument("--curves-csv", default=None)
+    parser.add_argument("--animation-dir", default=None)
+    parser.add_argument("--validation-dir", default=None)
     parser.add_argument("--geometry-tolerance", type=float, default=GEOMETRY_TOLERANCE)
     parser.add_argument("--geometry-loss-weight", type=float, default=GEOMETRY_LOSS_WEIGHT)
     parser.add_argument("--geometry-num-samples-x", type=int, default=GEOMETRY_NUM_SAMPLES_X)
@@ -361,11 +364,40 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--geometry-validation-montage",
-        default="outputs/diagnostics/geometry_aware_bbox_alignment_montage.png",
+        default=None,
     )
     parser.add_argument("--shape-test-only", action="store_true")
     parser.add_argument("--validation-smoke-test", action="store_true")
     return parser.parse_args()
+
+
+def geometry_loss_weight_tag(weight: float) -> str:
+    raw = f"{float(weight):.12g}"
+    safe = raw.replace("-", "neg").replace("+", "").replace(".", "p")
+    return f"geom_weight_{safe}"
+
+
+def configure_output_paths(args: argparse.Namespace) -> None:
+    tag = geometry_loss_weight_tag(args.geometry_loss_weight)
+    args.geometry_loss_weight_tag = tag
+    if args.output_dir is None:
+        args.output_dir = str(Path(f"{OUTPUT_DIR}_{tag}"))
+    output_dir = Path(args.output_dir)
+    artifact_stem = f"{CHECKPOINT_STEM}_{tag}"
+    if args.best_checkpoint is None:
+        args.best_checkpoint = str(output_dir / f"{artifact_stem}_best.pt")
+    if args.best_geometry_checkpoint is None:
+        args.best_geometry_checkpoint = str(output_dir / f"{artifact_stem}_best_geometry.pt")
+    if args.latest_checkpoint is None:
+        args.latest_checkpoint = str(output_dir / f"{artifact_stem}_latest.pt")
+    if args.curves_csv is None:
+        args.curves_csv = str(output_dir / f"{artifact_stem}_training_curves.csv")
+    if args.animation_dir is None:
+        args.animation_dir = str(output_dir / "rollout_training_animations")
+    if args.validation_dir is None:
+        args.validation_dir = str(output_dir / "validation")
+    if args.geometry_validation_montage is None:
+        args.geometry_validation_montage = str(output_dir / "validation" / f"{artifact_stem}_bbox_alignment_montage.png")
 
 
 def print_startup_banner() -> None:

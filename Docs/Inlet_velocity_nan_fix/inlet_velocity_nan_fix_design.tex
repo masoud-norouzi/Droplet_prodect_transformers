@@ -1,0 +1,128 @@
+\documentclass[11pt]{article}
+\usepackage[margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage{hyperref}
+
+\title{Fixing Missing Initial Velocity for Newly Entering Inlet Droplets}
+\author{Droplet rollout modeling notes}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Problem}
+
+The canonical droplet dataset stores each droplet state as
+\[
+    (x, y, v_x, v_y, c),
+\]
+where \(c\) is circularity. Velocities are currently computed by finite
+differencing each track:
+\[
+    v_x(t) = x(t) - x(t-1), \qquad
+    v_y(t) = y(t) - y(t-1).
+\]
+At the first visible frame of a track, there is no previous observation.
+Therefore \(v_x\) and \(v_y\) are undefined and become NaN.
+
+During model-window construction, non-finite values in the input history are
+converted to zero. For newly entering inlet droplets this silently converts an
+unknown inlet velocity into a stationary state. This is physically wrong: a
+droplet appearing at the inlet is not stationary; it has just entered the field
+of view.
+
+\section{Observed Impact}
+
+The failure case for track 3032 illustrates the problem. At the Markovian input
+frame, the droplet has just appeared near the upper inlet, but its velocity is
+missing:
+\[
+    y \approx 3.9,\qquad v_x = \mathrm{NaN},\qquad v_y = \mathrm{NaN}.
+\]
+After NaNs are converted to zero, the model receives an input resembling a
+stationary droplet near the inlet. The true future motion, however, rapidly
+reaches approximately \(11\) pixels per frame in the \(y\) direction.
+
+In validation diagnostics, this start-state issue affected 110 evaluable
+trajectories, or about \(0.62\%\) of all evaluable validation trajectories. It
+was highly concentrated at the inlet: 109 of 110 affected cases had input
+\(y < 10\) pixels. Although rare by sample count, these cases were strongly
+associated with severe channel-admissibility failures in the geometry-aware
+Markovian rollout.
+
+\section{Scientific Interpretation}
+
+This is a data representation issue, not a model architecture issue. The
+observed state is intended to include velocity. For newly entering droplets,
+the velocity is not measured at the first visible frame, but the current
+preprocessing turns that missing value into a literal zero. The model is
+therefore asked to interpret an ambiguous and physically misleading state.
+
+The issue is especially important for Markovian models, because they receive
+only the current state. A history-based model can often infer motion from
+previous frames when they exist, but a one-frame Markovian model cannot infer
+an inlet velocity from a single position if the velocity channel has been
+zeroed.
+
+\section{Required Correction}
+
+The correction should be applied once, when constructing the canonical dataset,
+before train/validation/test window construction and before any model-specific
+data loading. This ensures that all models consume the same corrected state
+representation.
+
+Let \(\mathcal{I}\) denote finite velocity observations in the incoming inlet
+region. The inlet prior velocity is
+\[
+    \bar{v}_x^{\mathrm{inlet}}
+    =
+    \frac{1}{|\mathcal{I}|}
+    \sum_{i \in \mathcal{I}} v_{x,i},
+    \qquad
+    \bar{v}_y^{\mathrm{inlet}}
+    =
+    \frac{1}{|\mathcal{I}|}
+    \sum_{i \in \mathcal{I}} v_{y,i}.
+\]
+
+For newly visible inlet droplets only, replace missing velocity components:
+\[
+    v_x \leftarrow \bar{v}_x^{\mathrm{inlet}}
+    \quad \mathrm{if}\quad v_x=\mathrm{NaN},
+\]
+\[
+    v_y \leftarrow \bar{v}_y^{\mathrm{inlet}}
+    \quad \mathrm{if}\quad v_y=\mathrm{NaN}.
+\]
+
+The patch must not be applied to arbitrary missing velocities elsewhere in the
+channel. The intended criterion is:
+\begin{enumerate}
+    \item the row is the first visible frame of its track,
+    \item the droplet is in the incoming inlet region,
+    \item at least one of \(v_x, v_y\) is non-finite.
+\end{enumerate}
+
+\section{Diagnostics}
+
+The canonical dataset build should report:
+\begin{itemize}
+    \item the inlet-region criterion,
+    \item \(\bar{v}_x^{\mathrm{inlet}}\),
+    \item \(\bar{v}_y^{\mathrm{inlet}}\),
+    \item number of droplet rows patched,
+    \item number of velocity values patched,
+    \item number of affected unique tracks.
+\end{itemize}
+
+\section{Expected Result}
+
+After rebuilding the canonical dataset, first-visible inlet droplets should no
+longer enter model inputs with zeroed velocities. History-20, Markovian, and
+geometry-aware Markovian models should all train and evaluate from the same
+corrected canonical state tensor. No model architecture, rollout logic,
+boundary injection, loss function, geometry mask, or ellipse construction
+should change.
+
+\end{document}
