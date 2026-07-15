@@ -1,0 +1,193 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{xcolor}
+
+\title{Junction Branch Decisions and Geometry Violations}
+\author{Droplet rollout model comparison}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Purpose}
+
+This note documents the junction branch-decision diagnostic and the follow-up
+geometry-violation analysis.  The goal is to separate two related but distinct
+failure modes:
+
+\begin{itemize}
+  \item \textbf{Decision error:} the model commits to the wrong outgoing branch
+  at the junction.
+  \item \textbf{Physical geometry error:} the predicted droplet footprint leaves
+  the admissible channel mask, measured by ellipse outside-channel fraction.
+\end{itemize}
+
+The analysis uses saved validation rollout predictions from:
+\begin{verbatim}
+outputs/models/rollout_model_comparison/rollout_predictions.npz
+\end{verbatim}
+
+No model inference or retraining is involved.
+
+\section{Junction Event Definition}
+
+True junction events are identified from the true future trajectory only.  A
+trajectory is counted as a true junction event when it has at least one valid
+assignment to an explicitly allowed incoming branch before committing to an
+outgoing branch.  The outgoing branch commitment rule is:
+
+\begin{quote}
+same outgoing branch assignment for 3 consecutive evaluable rollout steps.
+\end{quote}
+
+The outgoing branches are \texttt{left} and \texttt{right}.  The incoming branch
+used in this validation set is \texttt{inlet}.  Arbitrary non-outgoing branches
+are not treated as incoming, and a trajectory that begins already assigned to
+\texttt{left} or \texttt{right} is not counted as a true junction event.
+
+The corrected event finder identified 4,990 true junction events:
+\begin{itemize}
+  \item \texttt{inlet -> left}: 1,555 events
+  \item \texttt{inlet -> right}: 3,435 events
+\end{itemize}
+
+\section{Branch Decision Results}
+
+\begin{table}[h]
+\centering
+\caption{Junction decision classification by model.}
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & Events & Correct & Wrong & No commit & Wrong rate & Noncommit rate \\
+\midrule
+History-20 & 4,990 & 4,715 & 243 & 32 & 4.9\% & 0.6\% \\
+Markovian & 4,990 & 4,514 & 387 & 89 & 7.9\% & 1.8\% \\
+Geometry-aware & 4,990 & 4,498 & 435 & 57 & 8.8\% & 1.1\% \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.76\linewidth]{../../outputs/models/rollout_model_comparison_junction_smoke/junction_decision_outcomes.png}
+\caption{Decision outcome composition for true junction events.  Each bar is
+normalized by the number of true junction events for that model.}
+\end{figure}
+
+\section{Branch Confusion Matrices}
+
+The confusion matrices below include only committed decisions: \texttt{correct}
+and \texttt{wrong\_branch}.  \texttt{no\_commitment} and \texttt{unclassifiable}
+events are excluded from these matrices.
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{../../outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_history_20.png}
+\caption{History-20 branch-decision confusion matrix.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{../../outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_markovian.png}
+\caption{Markovian branch-decision confusion matrix.}
+\end{figure}
+
+\begin{figure}[h]
+\centering
+\includegraphics[width=0.48\linewidth]{../../outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_geometry_aware.png}
+\caption{Geometry-aware Markovian branch-decision confusion matrix.}
+\end{figure}
+
+\clearpage
+\section{Geometry Violations for Wrong Branch Decisions}
+
+A geometry violation is defined as a predicted droplet ellipse outside-channel
+fraction greater than the configured geometry tolerance.  The table below asks:
+among droplets that committed to the wrong outgoing branch, how many also
+violated the channel geometry?
+
+\begin{table}[h]
+\centering
+\caption{Geometry violations among wrong-branch decisions.}
+\begin{tabular}{lrrrr}
+\toprule
+Model & Wrong branch & Violating & Fraction & Median peak outside \\
+\midrule
+History-20 & 243 & 142 & 58.4\% & 0.030 \\
+Markovian & 387 & 244 & 63.0\% & 0.053 \\
+Geometry-aware & 435 & 225 & 51.7\% & 0.021 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+The geometry-aware model has more wrong-branch decisions in this saved run, but
+a smaller fraction of those wrong decisions leave the channel.  Its median peak
+outside-channel fraction is also lower than the Markovian baseline.  This
+suggests that the geometry-aware model may reduce physically impossible wrong
+rollouts even when it does not correct the branch-choice decision itself.
+
+\section{Geometry Violations for Correct Branch Decisions}
+
+The same geometry test was repeated for droplets whose predicted branch decision
+was correct.  This asks whether the model chooses the right outgoing channel but
+still places the droplet footprint outside the admissible channel.
+
+\begin{table}[h]
+\centering
+\caption{Geometry violations among correct-branch decisions.}
+\begin{tabular}{lrrrr}
+\toprule
+Model & Correct branch & Violating & Fraction & Median peak outside \\
+\midrule
+History-20 & 4,715 & 687 & 14.6\% & 0.000 \\
+Markovian & 4,514 & 1,596 & 35.4\% & 0.005 \\
+Geometry-aware & 4,498 & 2,801 & 62.3\% & 0.046 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+This is the surprising result.  In this saved prediction set, the geometry-aware
+model often predicts the correct outgoing branch but still violates the channel
+footprint criterion.  This points to a placement or wall-clearance failure rather
+than a branch-selection failure: the model may be choosing the correct channel
+while placing droplets too close to, or partially outside, the detected channel
+boundary.
+
+\section{Output Files}
+
+Primary junction-decision outputs:
+\begin{verbatim}
+outputs/models/rollout_model_comparison_junction_smoke/junction_decision_metrics.csv
+outputs/models/rollout_model_comparison_junction_smoke/junction_decision_events.csv
+outputs/models/rollout_model_comparison_junction_smoke/junction_decision_outcomes.png
+outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_history_20.png
+outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_markovian.png
+outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_geometry_aware.png
+\end{verbatim}
+
+Geometry follow-up outputs:
+\begin{verbatim}
+outputs/models/rollout_model_comparison_wrong_decision_geometry/
+outputs/models/rollout_model_comparison_correct_decision_geometry/
+\end{verbatim}
+
+\section{Interpretation}
+
+The decision and geometry diagnostics together show that branch choice and
+physical admissibility are not the same error mode.  The history-based model has
+the best branch-decision accuracy and the lowest rate of geometry violation
+among correct decisions.  The Markovian model is worse on both branch decisions
+and physical placement.  The geometry-aware model reduces the severity of
+wrong-branch geometry violations, but in this saved run it has a high rate of
+geometry violations even for correct branch decisions.
+
+The next useful diagnostic is to inspect geometry-aware correct-branch events
+with large outside-channel fractions.  These cases should reveal whether the
+model is systematically hugging one wall, cutting corners at the junction, or
+using bounding-box footprints that are too large for the local channel width.
+
+\end{document}

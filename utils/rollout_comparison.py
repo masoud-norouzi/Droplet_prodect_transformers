@@ -5,8 +5,10 @@ import csv
 from dataclasses import dataclass
 from pathlib import Path
 import sys
+import time
 from typing import Callable
 
+import cv2
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
@@ -136,6 +138,44 @@ class DirectionalMetricCurves:
     axis_valid_fraction: np.ndarray
     n_orientation_valid_samples: np.ndarray
     orientation_valid_fraction: np.ndarray
+
+
+@dataclass
+class BranchAssignment:
+    branch_name: np.ndarray
+    axis_valid: np.ndarray
+    status: np.ndarray
+
+
+@dataclass
+class JunctionDecisionEvent:
+    window_row: int
+    window_id: int
+    rollout_start_frame: int
+    track_id: int
+    slot: int
+    true_incoming_branch: str
+    true_branch: str
+    true_commitment_step: int
+    pred_branch_by_model: dict[str, str]
+    pred_commitment_step_by_model: dict[str, int]
+    decision_status_by_model: dict[str, str]
+    commitment_step_delay_by_model: dict[str, float]
+
+
+@dataclass
+class JunctionDecisionMetrics:
+    n_true_junction_events: int
+    n_correct: int
+    n_wrong_branch: int
+    n_no_commitment: int
+    n_unclassifiable: int
+    wrong_decision_rate: float
+    noncommitment_rate: float
+    mean_commitment_step_delay: float
+    median_commitment_step_delay: float
+    confusion_counts: dict[tuple[str, str], int]
+    true_event_transition_counts: dict[tuple[str, str], int]
 
 
 @dataclass
@@ -478,6 +518,9 @@ class RolloutModelComparator:
         self.channel_metrics: dict[str, ChannelAdmissibilityMetricCurves] = {}
         self.channel_bootstrap: dict[str, dict[str, np.ndarray]] = {}
         self.channel_trajectory_metrics: dict[str, TrajectoryAdmissibilityMetrics] = {}
+        self.junction_events: list[JunctionDecisionEvent] = []
+        self.junction_metrics: dict[str, JunctionDecisionMetrics] = {}
+        self.junction_bootstrap: dict[str, dict[str, tuple[float, float]]] = {}
 
     def run_inference(self) -> dict[str, RolloutPrediction]:
         print("Building aligned validation rollout windows...", flush=True)
@@ -742,6 +785,115 @@ class RolloutModelComparator:
 
         validate_common_channel_masks(self.predictions, self.channel_context)
         validate_channel_sanity_checks(self.channel_context)
+
+    def compute_junction_decision_metrics(
+        self,
+        centerline_csv: Path,
+        pca_half_window: int = 8,
+        min_quality: float = 3.0,
+        max_centerline_distance: float = 30.0,
+        min_orientation_speed: float = 1.0e-3,
+        min_branch_distance_margin: float | None = None,
+        min_branch_relative_margin: float | None = None,
+        outgoing_branches: tuple[str, ...] = ("left", "right"),
+        incoming_branches: tuple[str, ...] = ("inlet", "outlet"),
+        commitment_steps: int = 3,
+    ) -> None:
+        if not self.predictions:
+            raise RuntimeError("No predictions available for junction decision analysis.")
+        if self.bootstrap_indices is None:
+            self.bootstrap_metrics()
+
+        summarize_junction_decision_logic(
+            outgoing_branches=outgoing_branches,
+            incoming_branches=incoming_branches,
+            commitment_steps=commitment_steps,
+        )
+        estimator = CenterlineTangentEstimator(
+            centerline_csv=centerline_csv,
+            pca_half_window=pca_half_window,
+            min_quality=min_quality,
+            max_centerline_distance=max_centerline_distance,
+            min_orientation_speed=min_orientation_speed,
+            min_branch_distance_margin=min_branch_distance_margin,
+            min_branch_relative_margin=min_branch_relative_margin,
+        )
+        reference = next(iter(self.predictions.values()))
+        start_time = time.time()
+        print("Assigning true trajectories to centerline branches...", flush=True)
+        true_assignment = assign_centerline_branches(
+            estimator,
+            reference.true_position,
+            reference.true_velocity,
+            reference.metric_mask,
+        )
+        print(f"  true branch assignment complete in {time.time() - start_time:.2f}s", flush=True)
+        print("Assigning predicted trajectories to centerline branches...", flush=True)
+        predicted_assignments: dict[str, BranchAssignment] = {}
+        for model_name, prediction in self.predictions.items():
+            model_start = time.time()
+            predicted_assignments[model_name] = assign_centerline_branches(
+                estimator,
+                prediction.pred_position,
+                prediction.pred_velocity,
+                prediction.metric_mask,
+            )
+            print(f"  {model_name}: branch assignment complete in {time.time() - model_start:.2f}s", flush=True)
+
+        print("Identifying true junction events and classifying model decisions...", flush=True)
+        event_start = time.time()
+        legacy_event_count = count_legacy_loose_junction_events(
+            true_assignment=true_assignment,
+            metric_mask=reference.metric_mask,
+            outgoing_branches=tuple(outgoing_branches),
+            commitment_steps=commitment_steps,
+        )
+        self.junction_events = identify_junction_decision_events(
+            reference=reference,
+            true_assignment=true_assignment,
+            predicted_assignments=predicted_assignments,
+            outgoing_branches=outgoing_branches,
+            incoming_branches=incoming_branches,
+            commitment_steps=commitment_steps,
+        )
+        print(f"  junction event classification complete in {time.time() - event_start:.2f}s", flush=True)
+        summarize_true_junction_event_counts(self.junction_events, legacy_event_count)
+        self.junction_metrics = {
+            model_name: compute_junction_decision_metrics_for_model(self.junction_events, model_name)
+            for model_name in self.predictions
+        }
+        self.junction_bootstrap = {
+            model_name: bootstrap_junction_decision_rates(
+                self.junction_events,
+                model_name,
+                self.bootstrap_indices,
+                n_windows=int(reference.window_id.shape[0]),
+            )
+            for model_name in self.predictions
+        }
+        summarize_junction_decision_metrics(self.junction_metrics)
+
+    def save_junction_decision_outputs(self) -> tuple[Path, Path]:
+        metrics_path = self.output_dir / "junction_decision_metrics.csv"
+        events_path = self.output_dir / "junction_decision_events.csv"
+        write_junction_decision_metrics_csv(metrics_path, self.junction_metrics, self.junction_bootstrap)
+        write_junction_decision_events_csv(events_path, self.junction_events, list(self.predictions))
+        return metrics_path, events_path
+
+    def plot_junction_decision_outputs(self) -> tuple[tuple[Path, Path], dict[str, tuple[Path, Path]]]:
+        outcome_paths = plot_junction_decision_outcomes(
+            output_dir=self.output_dir,
+            metrics=self.junction_metrics,
+        )
+        confusion_paths = {
+            model_name: plot_junction_confusion_matrix(
+                output_dir=self.output_dir,
+                events=self.junction_events,
+                model_name=model_name,
+            )
+            for model_name in self.predictions
+        }
+        return outcome_paths, confusion_paths
 
     def save_channel_admissibility_outputs(self) -> tuple[Path, Path, Path]:
         csv_path = self.output_dir / "channel_admissibility_metrics.csv"
@@ -1566,6 +1718,527 @@ def bootstrap_directional_metrics(
     return output
 
 
+def assign_centerline_branches(
+    estimator: CenterlineTangentEstimator,
+    positions: np.ndarray,
+    velocities: np.ndarray,
+    valid_mask: np.ndarray,
+) -> BranchAssignment:
+    shape = valid_mask.shape
+    branch_name = np.full(shape, "", dtype="<U64")
+    axis_valid = np.zeros(shape, dtype=bool)
+    status = np.full(shape, "not_evaluated", dtype="<U64")
+    flat_positions = positions.reshape(-1, 2)
+    flat_valid = valid_mask.reshape(-1)
+    valid_indices = np.flatnonzero(flat_valid)
+    if valid_indices.size == 0:
+        return BranchAssignment(branch_name=branch_name, axis_valid=axis_valid, status=status)
+
+    flat_branch_name = branch_name.reshape(-1)
+    flat_axis_valid = axis_valid.reshape(-1)
+    flat_status = status.reshape(-1)
+    candidate_positions = flat_positions[valid_indices].astype(np.float64, copy=False)
+    finite = np.isfinite(candidate_positions).all(axis=1)
+    finite_indices = valid_indices[finite]
+    if finite_indices.size == 0:
+        flat_status[valid_indices] = "nonfinite_input"
+        return BranchAssignment(branch_name=branch_name, axis_valid=axis_valid, status=status)
+
+    finite_positions = candidate_positions[finite]
+    branch_items = list(estimator.branches.items())
+    branch_names = [name for name, _ in branch_items]
+    all_branch_points = np.concatenate([np.asarray(points, dtype=np.float64) for _, points in branch_items], axis=0)
+    max_x = float(np.nanmax(all_branch_points[:, 0]))
+    max_y = float(np.nanmax(all_branch_points[:, 1]))
+    width = int(np.ceil(max_x + estimator.max_centerline_distance + 4))
+    height = int(np.ceil(max_y + estimator.max_centerline_distance + 4))
+    width = max(width, 1)
+    height = max(height, 1)
+    distance_by_branch = np.empty((finite_positions.shape[0], len(branch_items)), dtype=np.float64)
+    sample_x = np.rint(finite_positions[:, 0]).astype(np.int64)
+    sample_y = np.rint(finite_positions[:, 1]).astype(np.int64)
+    in_image = (sample_x >= 0) & (sample_x < width) & (sample_y >= 0) & (sample_y < height)
+    for branch_index, (_, branch_points) in enumerate(branch_items):
+        branch_image = np.zeros((height, width), dtype=np.uint8)
+        rounded = np.rint(np.asarray(branch_points, dtype=np.float64)).astype(np.int32)
+        rounded[:, 0] = np.clip(rounded[:, 0], 0, width - 1)
+        rounded[:, 1] = np.clip(rounded[:, 1], 0, height - 1)
+        if len(rounded) == 1:
+            x, y = rounded[0]
+            branch_image[y, x] = 255
+        else:
+            cv2.polylines(branch_image, [rounded.reshape(-1, 1, 2)], isClosed=False, color=255, thickness=1)
+        distance_map = cv2.distanceTransform(255 - branch_image, cv2.DIST_L2, 5)
+        branch_distance = np.full((finite_positions.shape[0],), np.inf, dtype=np.float64)
+        branch_distance[in_image] = distance_map[sample_y[in_image], sample_x[in_image]]
+        distance_by_branch[:, branch_index] = branch_distance
+
+    order = np.argsort(distance_by_branch, axis=1)
+    nearest_index = order[:, 0]
+    nearest_distance = distance_by_branch[np.arange(distance_by_branch.shape[0]), nearest_index]
+    if len(branch_items) > 1:
+        second_index = order[:, 1]
+        second_distance = distance_by_branch[np.arange(distance_by_branch.shape[0]), second_index]
+    else:
+        second_distance = np.full_like(nearest_distance, np.inf)
+    branch_margin = second_distance - nearest_distance
+    branch_relative_margin = branch_margin / (nearest_distance + 1.0e-12)
+
+    for branch_index, name in enumerate(branch_names):
+        flat_branch_name[finite_indices[nearest_index == branch_index]] = str(name)
+    flat_status[finite_indices] = "valid_branch"
+    too_far = nearest_distance > estimator.max_centerline_distance
+    flat_status[finite_indices[too_far]] = "too_far_from_centerline"
+    ambiguous = np.zeros_like(too_far, dtype=bool)
+    if estimator.min_branch_distance_margin is not None:
+        ambiguous |= branch_margin < float(estimator.min_branch_distance_margin)
+    if estimator.min_branch_relative_margin is not None:
+        ambiguous |= branch_relative_margin < float(estimator.min_branch_relative_margin)
+    flat_status[finite_indices[ambiguous & ~too_far]] = "branch_ambiguous"
+    flat_axis_valid[finite_indices[~too_far & ~ambiguous]] = True
+    flat_status[valid_indices[~finite]] = "nonfinite_input"
+    return BranchAssignment(branch_name=branch_name, axis_valid=axis_valid, status=status)
+
+
+def identify_junction_decision_events(
+    reference: RolloutPrediction,
+    true_assignment: BranchAssignment,
+    predicted_assignments: dict[str, BranchAssignment],
+    outgoing_branches: tuple[str, ...],
+    incoming_branches: tuple[str, ...],
+    commitment_steps: int,
+) -> list[JunctionDecisionEvent]:
+    outgoing_branch_to_code = {branch: index + 1 for index, branch in enumerate(outgoing_branches)}
+    outgoing_code_to_branch = {code: branch for branch, code in outgoing_branch_to_code.items()}
+    incoming_branch_to_code = {branch: index + 1 for index, branch in enumerate(incoming_branches)}
+    incoming_code_to_branch = {code: branch for branch, code in incoming_branch_to_code.items()}
+    true_codes = encode_branch_commitment_codes(true_assignment, reference.metric_mask, outgoing_branch_to_code)
+    true_incoming_codes = encode_specific_branch_codes(true_assignment, reference.metric_mask, incoming_branch_to_code)
+    pred_codes = {
+        model_name: encode_branch_commitment_codes(assignment, reference.metric_mask, outgoing_branch_to_code)
+        for model_name, assignment in predicted_assignments.items()
+    }
+    events: list[JunctionDecisionEvent] = []
+    n_windows, _, n_slots = reference.metric_mask.shape
+    candidate_windows, candidate_slots = np.nonzero(np.any(true_codes != -99, axis=1))
+    for window_row, slot in zip(candidate_windows.tolist(), candidate_slots.tolist()):
+        codes = true_codes[window_row, :, slot]
+        true_code, true_step = find_persistent_branch_commitment_code(codes, commitment_steps)
+        if true_code is None or true_step is None:
+            continue
+        true_incoming_code = find_final_incoming_before_commitment(
+            outgoing_codes=codes,
+            incoming_codes=true_incoming_codes[window_row, :, slot],
+            commitment_end_step=int(true_step),
+            commitment_steps=commitment_steps,
+        )
+        if true_incoming_code is None:
+            continue
+        true_branch = outgoing_code_to_branch[int(true_code)]
+        true_incoming_branch = incoming_code_to_branch[int(true_incoming_code)]
+
+        pred_branch_by_model: dict[str, str] = {}
+        pred_step_by_model: dict[str, int] = {}
+        status_by_model: dict[str, str] = {}
+        delay_by_model: dict[str, float] = {}
+        for model_name, codes_by_model in pred_codes.items():
+            pred_code, pred_step = find_persistent_branch_commitment_code(
+                codes_by_model[window_row, :, slot],
+                commitment_steps,
+            )
+            if pred_code is None or pred_step is None:
+                assignment = predicted_assignments[model_name]
+                pred_valid = reference.metric_mask[window_row, :, slot] & assignment.axis_valid[window_row, :, slot]
+                status = classify_missing_prediction_commitment(pred_valid, assignment.status[window_row, :, slot])
+                pred_branch_value = ""
+                pred_step_value = -1
+                delay_value = np.nan
+            else:
+                pred_branch = outgoing_code_to_branch[int(pred_code)]
+                status = "correct" if pred_branch == true_branch else "wrong_branch"
+                pred_branch_value = pred_branch
+                pred_step_value = int(pred_step)
+                delay_value = float(pred_step - true_step) if status == "correct" else np.nan
+            pred_branch_by_model[model_name] = pred_branch_value
+            pred_step_by_model[model_name] = pred_step_value
+            status_by_model[model_name] = status
+            delay_by_model[model_name] = delay_value
+
+        events.append(
+            JunctionDecisionEvent(
+                window_row=int(window_row),
+                window_id=int(reference.window_id[window_row]),
+                rollout_start_frame=int(reference.rollout_start_frame[window_row]),
+                track_id=int(reference.track_ids[window_row, slot]),
+                slot=int(slot),
+                true_incoming_branch=str(true_incoming_branch),
+                true_branch=str(true_branch),
+                true_commitment_step=int(true_step),
+                pred_branch_by_model=pred_branch_by_model,
+                pred_commitment_step_by_model=pred_step_by_model,
+                decision_status_by_model=status_by_model,
+                commitment_step_delay_by_model=delay_by_model,
+            )
+        )
+    return events
+
+
+def encode_branch_commitment_codes(
+    assignment: BranchAssignment,
+    metric_mask: np.ndarray,
+    branch_to_code: dict[str, int],
+) -> np.ndarray:
+    codes = np.full(metric_mask.shape, -99, dtype=np.int16)
+    valid = metric_mask & assignment.axis_valid
+    codes[valid] = 0
+    for branch, code in branch_to_code.items():
+        codes[valid & (assignment.branch_name == branch)] = int(code)
+    return codes
+
+
+def encode_specific_branch_codes(
+    assignment: BranchAssignment,
+    metric_mask: np.ndarray,
+    branch_to_code: dict[str, int],
+) -> np.ndarray:
+    codes = np.full(metric_mask.shape, -99, dtype=np.int16)
+    valid = metric_mask & assignment.axis_valid
+    codes[valid] = 0
+    for branch, code in branch_to_code.items():
+        codes[valid & (assignment.branch_name == branch)] = int(code)
+    return codes
+
+
+def find_final_incoming_before_commitment(
+    outgoing_codes: np.ndarray,
+    incoming_codes: np.ndarray,
+    commitment_end_step: int,
+    commitment_steps: int,
+) -> int | None:
+    valid_steps = np.flatnonzero(outgoing_codes != -99)
+    if valid_steps.size == 0:
+        return None
+    if int(outgoing_codes[int(valid_steps[0])]) > 0:
+        return None
+
+    commitment_start_step = int(commitment_end_step) - int(commitment_steps) + 1
+    if commitment_start_step <= 0:
+        return None
+    prior_incoming_steps = np.flatnonzero(incoming_codes[:commitment_start_step] > 0)
+    if prior_incoming_steps.size == 0:
+        return None
+    return int(incoming_codes[int(prior_incoming_steps[-1])])
+
+
+def count_legacy_loose_junction_events(
+    true_assignment: BranchAssignment,
+    metric_mask: np.ndarray,
+    outgoing_branches: tuple[str, ...],
+    commitment_steps: int,
+) -> int:
+    branch_to_code = {branch: index + 1 for index, branch in enumerate(outgoing_branches)}
+    codes = encode_branch_commitment_codes(true_assignment, metric_mask, branch_to_code)
+    count = 0
+    candidate_windows, candidate_slots = np.nonzero(np.any(codes != -99, axis=1))
+    for window_row, slot in zip(candidate_windows.tolist(), candidate_slots.tolist()):
+        trajectory_codes = codes[window_row, :, slot]
+        if not starts_as_legacy_uncommitted_code(trajectory_codes, commitment_steps):
+            continue
+        true_code, _ = find_persistent_branch_commitment_code(trajectory_codes, commitment_steps)
+        if true_code is not None:
+            count += 1
+    return count
+
+
+def starts_as_legacy_uncommitted_code(codes: np.ndarray, commitment_steps: int) -> bool:
+    valid_steps = np.flatnonzero(codes != -99)
+    if valid_steps.size == 0:
+        return False
+    first_code = int(codes[int(valid_steps[0])])
+    if first_code <= 0:
+        return True
+    first_run = 0
+    for step in valid_steps:
+        if int(codes[int(step)]) != first_code:
+            break
+        first_run += 1
+    return first_run < commitment_steps
+
+
+def find_persistent_branch_commitment_code(
+    codes: np.ndarray,
+    commitment_steps: int,
+) -> tuple[int | None, int | None]:
+    horizon = int(codes.shape[0])
+    for start in range(0, horizon - commitment_steps + 1):
+        code = int(codes[start])
+        if code <= 0:
+            continue
+        committed = True
+        for offset in range(1, commitment_steps):
+            if int(codes[start + offset]) != code:
+                committed = False
+                break
+        if committed:
+            return code, start + commitment_steps - 1
+    return None, None
+
+
+def classify_missing_prediction_commitment(pred_valid: np.ndarray, pred_status: np.ndarray) -> str:
+    if bool(pred_valid.any()):
+        return "no_commitment"
+    usable_status = [str(value) for value in pred_status if str(value) not in ("", "not_evaluated")]
+    return "unclassifiable" if usable_status else "no_commitment"
+
+
+def compute_junction_decision_metrics_for_model(
+    events: list[JunctionDecisionEvent],
+    model_name: str,
+) -> JunctionDecisionMetrics:
+    statuses = [event.decision_status_by_model[model_name] for event in events]
+    n_correct = int(sum(status == "correct" for status in statuses))
+    n_wrong = int(sum(status == "wrong_branch" for status in statuses))
+    n_no_commitment = int(sum(status == "no_commitment" for status in statuses))
+    n_unclassifiable = int(sum(status == "unclassifiable" for status in statuses))
+    wrong_denominator = n_correct + n_wrong
+    wrong_rate = float(n_wrong / wrong_denominator) if wrong_denominator else np.nan
+    noncommitment_rate = float(n_no_commitment / len(events)) if events else np.nan
+    delays = np.asarray(
+        [
+            event.commitment_step_delay_by_model[model_name]
+            for event in events
+            if event.decision_status_by_model[model_name] == "correct"
+            and np.isfinite(event.commitment_step_delay_by_model[model_name])
+        ],
+        dtype=np.float64,
+    )
+    confusion: dict[tuple[str, str], int] = {}
+    for event in events:
+        pred_branch = event.pred_branch_by_model[model_name]
+        if event.decision_status_by_model[model_name] in ("correct", "wrong_branch") and pred_branch:
+            key = (event.true_branch, pred_branch)
+            confusion[key] = confusion.get(key, 0) + 1
+    return JunctionDecisionMetrics(
+        n_true_junction_events=int(len(events)),
+        n_correct=n_correct,
+        n_wrong_branch=n_wrong,
+        n_no_commitment=n_no_commitment,
+        n_unclassifiable=n_unclassifiable,
+        wrong_decision_rate=wrong_rate,
+        noncommitment_rate=noncommitment_rate,
+        mean_commitment_step_delay=float(np.mean(delays)) if delays.size else np.nan,
+        median_commitment_step_delay=float(np.median(delays)) if delays.size else np.nan,
+        confusion_counts=confusion,
+        true_event_transition_counts=count_true_event_transitions(events),
+    )
+
+
+def count_true_event_transitions(events: list[JunctionDecisionEvent]) -> dict[tuple[str, str], int]:
+    counts: dict[tuple[str, str], int] = {}
+    for event in events:
+        key = (event.true_incoming_branch, event.true_branch)
+        counts[key] = counts.get(key, 0) + 1
+    return counts
+
+
+def bootstrap_junction_decision_rates(
+    events: list[JunctionDecisionEvent],
+    model_name: str,
+    bootstrap_indices: np.ndarray,
+    n_windows: int,
+) -> dict[str, tuple[float, float]]:
+    if not events:
+        return {"wrong_decision_rate": (np.nan, np.nan), "noncommitment_rate": (np.nan, np.nan)}
+    event_windows = np.asarray([event.window_row for event in events], dtype=np.int64)
+    statuses = np.asarray([event.decision_status_by_model[model_name] for event in events], dtype="<U32")
+    wrong_rates = np.empty((bootstrap_indices.shape[0],), dtype=np.float64)
+    noncommit_rates = np.empty((bootstrap_indices.shape[0],), dtype=np.float64)
+    for replicate, indices in enumerate(bootstrap_indices):
+        window_weights = np.bincount(indices.astype(np.int64), minlength=n_windows)
+        weights = window_weights[event_windows].astype(np.float64)
+        correct = float(weights[statuses == "correct"].sum())
+        wrong = float(weights[statuses == "wrong_branch"].sum())
+        no_commit = float(weights[statuses == "no_commitment"].sum())
+        total = float(weights.sum())
+        wrong_rates[replicate] = wrong / (correct + wrong) if (correct + wrong) > 0 else np.nan
+        noncommit_rates[replicate] = no_commit / total if total > 0 else np.nan
+    return {
+        "wrong_decision_rate": finite_percentile_ci(wrong_rates),
+        "noncommitment_rate": finite_percentile_ci(noncommit_rates),
+    }
+
+
+def finite_percentile_ci(samples: np.ndarray) -> tuple[float, float]:
+    finite = samples[np.isfinite(samples)]
+    if finite.size == 0:
+        return np.nan, np.nan
+    low, high = percentile_ci(finite)
+    return float(low), float(high)
+
+
+def format_confusion_counts(confusion: dict[tuple[str, str], int]) -> str:
+    return ";".join(
+        f"{true_branch}->{pred_branch}:{count}"
+        for (true_branch, pred_branch), count in sorted(confusion.items())
+    )
+
+
+def summarize_junction_decision_logic(
+    outgoing_branches: tuple[str, ...],
+    incoming_branches: tuple[str, ...],
+    commitment_steps: int,
+) -> None:
+    print("Junction branch-decision diagnostic:", flush=True)
+    print(
+        "  Junction events are identified from TRUE trajectories only: "
+        f"at least one explicit incoming-branch assignment before {commitment_steps} consecutive "
+        "evaluable steps on the same outgoing branch.",
+        flush=True,
+    )
+    print(f"  Outgoing branches: {', '.join(outgoing_branches)}", flush=True)
+    print(f"  Incoming/non-decision branches: {', '.join(incoming_branches)}", flush=True)
+    print("  Branch assignments reuse the centerline nearest-branch logic from the tangential/normal diagnostic.", flush=True)
+    print(
+        "  Arbitrary non-outgoing branches are not treated as incoming, and trajectories that begin "
+        "on an outgoing branch are not true junction events.",
+        flush=True,
+    )
+    print(
+        "  no_commitment means the prediction never persistently reaches an outgoing branch before its final "
+        "evaluable step; progression lag cannot be counted as wrong_branch.",
+        flush=True,
+    )
+    print("  unclassifiable means there was no usable branch assignment for that predicted event.", flush=True)
+
+
+def summarize_true_junction_event_counts(
+    events: list[JunctionDecisionEvent],
+    legacy_event_count: int,
+) -> None:
+    transition_counts = count_true_event_transitions(events)
+    removed_count = int(legacy_event_count) - len(events)
+    print("True junction-event identification:", flush=True)
+    print(f"  legacy loose event count: {legacy_event_count}", flush=True)
+    print(f"  corrected explicit-incoming event count: {len(events)}", flush=True)
+    print(f"  events removed relative to legacy loose logic: {removed_count}", flush=True)
+    print("  true event counts by incoming_branch -> true_outgoing_branch:", flush=True)
+    if transition_counts:
+        for (incoming_branch, outgoing_branch), count in sorted(transition_counts.items()):
+            print(f"    {incoming_branch} -> {outgoing_branch}: {count}", flush=True)
+    else:
+        print("    none", flush=True)
+
+
+def summarize_junction_decision_metrics(metrics: dict[str, JunctionDecisionMetrics]) -> None:
+    print("Junction branch-decision summary:", flush=True)
+    for model_name, item in metrics.items():
+        print(
+            f"  {model_name}: events={item.n_true_junction_events} "
+            f"correct={item.n_correct} wrong_branch={item.n_wrong_branch} "
+            f"no_commitment={item.n_no_commitment} unclassifiable={item.n_unclassifiable} "
+            f"wrong_decision_rate={item.wrong_decision_rate:.6f} "
+            f"noncommitment_rate={item.noncommitment_rate:.6f}",
+            flush=True,
+        )
+
+
+def write_junction_decision_metrics_csv(
+    path: Path,
+    metrics: dict[str, JunctionDecisionMetrics],
+    bootstrap: dict[str, dict[str, tuple[float, float]]],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "model",
+        "n_true_junction_events",
+        "n_correct",
+        "n_wrong_branch",
+        "n_no_commitment",
+        "n_unclassifiable",
+        "wrong_decision_rate",
+        "wrong_decision_rate_ci_low",
+        "wrong_decision_rate_ci_high",
+        "noncommitment_rate",
+        "noncommitment_rate_ci_low",
+        "noncommitment_rate_ci_high",
+        "mean_commitment_step_delay",
+        "median_commitment_step_delay",
+        "confusion_counts",
+        "true_event_transition_counts",
+    ]
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for model_name, item in metrics.items():
+            wrong_ci = bootstrap.get(model_name, {}).get("wrong_decision_rate", (np.nan, np.nan))
+            noncommit_ci = bootstrap.get(model_name, {}).get("noncommitment_rate", (np.nan, np.nan))
+            writer.writerow(
+                {
+                    "model": model_name,
+                    "n_true_junction_events": item.n_true_junction_events,
+                    "n_correct": item.n_correct,
+                    "n_wrong_branch": item.n_wrong_branch,
+                    "n_no_commitment": item.n_no_commitment,
+                    "n_unclassifiable": item.n_unclassifiable,
+                    "wrong_decision_rate": item.wrong_decision_rate,
+                    "wrong_decision_rate_ci_low": wrong_ci[0],
+                    "wrong_decision_rate_ci_high": wrong_ci[1],
+                    "noncommitment_rate": item.noncommitment_rate,
+                    "noncommitment_rate_ci_low": noncommit_ci[0],
+                    "noncommitment_rate_ci_high": noncommit_ci[1],
+                    "mean_commitment_step_delay": item.mean_commitment_step_delay,
+                    "median_commitment_step_delay": item.median_commitment_step_delay,
+                    "confusion_counts": format_confusion_counts(item.confusion_counts),
+                    "true_event_transition_counts": format_confusion_counts(item.true_event_transition_counts),
+                }
+            )
+
+
+def write_junction_decision_events_csv(
+    path: Path,
+    events: list[JunctionDecisionEvent],
+    model_names: list[str],
+) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "window_id",
+        "rollout_start_frame",
+        "track_id",
+        "slot",
+        "true_incoming_branch",
+        "true_branch",
+        "true_commitment_step",
+    ]
+    for model_name in model_names:
+        columns.extend(
+            [
+                f"{model_name}_pred_branch",
+                f"{model_name}_pred_commitment_step",
+                f"{model_name}_decision_status",
+                f"{model_name}_commitment_step_delay",
+            ]
+        )
+    with path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=columns)
+        writer.writeheader()
+        for event in events:
+            row = {
+                "window_id": event.window_id,
+                "rollout_start_frame": event.rollout_start_frame,
+                "track_id": event.track_id,
+                "slot": event.slot,
+                "true_incoming_branch": event.true_incoming_branch,
+                "true_branch": event.true_branch,
+                "true_commitment_step": event.true_commitment_step,
+            }
+            for model_name in model_names:
+                row[f"{model_name}_pred_branch"] = event.pred_branch_by_model[model_name]
+                row[f"{model_name}_pred_commitment_step"] = event.pred_commitment_step_by_model[model_name]
+                row[f"{model_name}_decision_status"] = event.decision_status_by_model[model_name]
+                row[f"{model_name}_commitment_step_delay"] = event.commitment_step_delay_by_model[model_name]
+            writer.writerow(row)
+
+
 def load_channel_mask_bool(mask_path: Path) -> np.ndarray:
     mask = np.load(mask_path)
     if mask.ndim != 2:
@@ -2153,6 +2826,122 @@ def plot_directional_metric(
     return pdf_path, png_path
 
 
+def plot_junction_decision_outcomes(
+    output_dir: Path,
+    metrics: dict[str, JunctionDecisionMetrics],
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    model_names = list(metrics)
+    outcome_names = ["correct", "wrong_branch", "no_commitment", "unclassifiable"]
+    colors = {
+        "correct": "#4C78A8",
+        "wrong_branch": "#E45756",
+        "no_commitment": "#F2CF5B",
+        "unclassifiable": "#BAB0AC",
+    }
+    values = np.zeros((len(outcome_names), len(model_names)), dtype=np.float64)
+    for model_index, model_name in enumerate(model_names):
+        item = metrics[model_name]
+        denominator = max(int(item.n_true_junction_events), 1)
+        values[:, model_index] = [
+            item.n_correct / denominator,
+            item.n_wrong_branch / denominator,
+            item.n_no_commitment / denominator,
+            item.n_unclassifiable / denominator,
+        ]
+
+    fig, ax = plt.subplots(figsize=(4.8, 3.2), constrained_layout=True)
+    x = np.arange(len(model_names))
+    bottom = np.zeros((len(model_names),), dtype=np.float64)
+    for outcome_index, outcome_name in enumerate(outcome_names):
+        ax.bar(
+            x,
+            values[outcome_index],
+            bottom=bottom,
+            width=0.62,
+            label=outcome_name,
+            color=colors[outcome_name],
+            edgecolor="white",
+            linewidth=0.6,
+        )
+        bottom += values[outcome_index]
+    ax.set_xticks(x)
+    ax.set_xticklabels(model_names, rotation=20, ha="right")
+    ax.set_ylim(0.0, 1.0)
+    ax.set_ylabel("Fraction of true junction events")
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.grid(axis="y", color="0.9", linewidth=0.6)
+    ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, 1.18), ncol=2)
+    pdf_path = output_dir / "junction_decision_outcomes.pdf"
+    png_path = output_dir / "junction_decision_outcomes.png"
+    fig.savefig(pdf_path)
+    fig.savefig(png_path, dpi=300)
+    plt.close(fig)
+    return pdf_path, png_path
+
+
+def plot_junction_confusion_matrix(
+    output_dir: Path,
+    events: list[JunctionDecisionEvent],
+    model_name: str,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    branches = ["left", "right"]
+    branch_to_index = {branch: index for index, branch in enumerate(branches)}
+    matrix = np.zeros((2, 2), dtype=np.int64)
+    for event in events:
+        status = event.decision_status_by_model[model_name]
+        if status not in ("correct", "wrong_branch"):
+            continue
+        true_branch = event.true_branch
+        pred_branch = event.pred_branch_by_model[model_name]
+        if true_branch not in branch_to_index or pred_branch not in branch_to_index:
+            continue
+        matrix[branch_to_index[true_branch], branch_to_index[pred_branch]] += 1
+
+    row_totals = matrix.sum(axis=1, keepdims=True)
+    percentages = np.divide(
+        matrix,
+        np.maximum(row_totals, 1),
+        out=np.zeros_like(matrix, dtype=np.float64),
+        where=row_totals > 0,
+    )
+
+    fig, ax = plt.subplots(figsize=(3.5, 3.2), constrained_layout=True)
+    image = ax.imshow(percentages, cmap="Blues", vmin=0.0, vmax=1.0)
+    ax.set_xticks(np.arange(2))
+    ax.set_yticks(np.arange(2))
+    ax.set_xticklabels(["pred left", "pred right"])
+    ax.set_yticklabels(["true left", "true right"])
+    ax.set_title(model_name)
+    for row in range(2):
+        for col in range(2):
+            value = percentages[row, col]
+            text_color = "white" if value >= 0.55 else "black"
+            ax.text(
+                col,
+                row,
+                f"{matrix[row, col]}\n{100.0 * value:.1f}%",
+                ha="center",
+                va="center",
+                color=text_color,
+                fontsize=9,
+            )
+    for spine in ax.spines.values():
+        spine.set_visible(False)
+    ax.tick_params(length=0)
+    colorbar = fig.colorbar(image, ax=ax, fraction=0.046, pad=0.04)
+    colorbar.set_label("Row-normalized fraction")
+    stem = f"junction_confusion_{model_name}"
+    pdf_path = output_dir / f"{stem}.pdf"
+    png_path = output_dir / f"{stem}.png"
+    fig.savefig(pdf_path)
+    fig.savefig(png_path, dpi=300)
+    plt.close(fig)
+    return pdf_path, png_path
+
+
 def build_default_adapters(args, device: torch.device) -> dict[str, RolloutModelAdapter]:
     if args.predictions_path is not None:
         return {}
@@ -2208,8 +2997,27 @@ def parse_args() -> argparse.Namespace:
         default=None,
         help="Optional relative nearest-vs-second-nearest branch margin threshold.",
     )
+    parser.add_argument(
+        "--junction-outgoing-branches",
+        nargs="+",
+        default=["left", "right"],
+        help="Centerline branch names that represent outgoing decision branches.",
+    )
+    parser.add_argument(
+        "--junction-incoming-branches",
+        nargs="+",
+        default=["inlet", "outlet"],
+        help="Centerline branch names treated as incoming/non-decision branches for event starts.",
+    )
+    parser.add_argument(
+        "--junction-commitment-steps",
+        type=int,
+        default=3,
+        help="Number of consecutive evaluable rollout steps required for branch commitment.",
+    )
     parser.add_argument("--skip-directional", action="store_true")
     parser.add_argument("--skip-channel-admissibility", action="store_true")
+    parser.add_argument("--skip-junction-decisions", action="store_true")
     parser.add_argument("--cpu", action="store_true")
     return parser.parse_args()
 
@@ -2244,6 +3052,9 @@ def main() -> None:
     directional_plots = None
     channel_csv = channel_trajectory_csv = channel_data = None
     channel_plots = None
+    junction_metrics_csv = junction_events_csv = None
+    junction_outcome_plots = None
+    junction_confusion_plots = None
     if not args.skip_directional:
         comparator.compute_directional_metrics(
             centerline_csv=args.centerline_csv,
@@ -2264,6 +3075,21 @@ def main() -> None:
         )
         channel_csv, channel_trajectory_csv, channel_data = comparator.save_channel_admissibility_outputs()
         channel_plots = comparator.plot_channel_admissibility_metrics()
+    if not args.skip_junction_decisions:
+        comparator.compute_junction_decision_metrics(
+            centerline_csv=args.centerline_csv,
+            pca_half_window=args.pca_half_window,
+            min_quality=args.min_tangent_quality,
+            max_centerline_distance=args.max_centerline_distance,
+            min_orientation_speed=args.min_orientation_speed,
+            min_branch_distance_margin=args.min_branch_distance_margin,
+            min_branch_relative_margin=args.min_branch_relative_margin,
+            outgoing_branches=tuple(args.junction_outgoing_branches),
+            incoming_branches=tuple(args.junction_incoming_branches),
+            commitment_steps=args.junction_commitment_steps,
+        )
+        junction_metrics_csv, junction_events_csv = comparator.save_junction_decision_outputs()
+        junction_outcome_plots, junction_confusion_plots = comparator.plot_junction_decision_outputs()
 
     print("Models evaluated:")
     for model_name in comparator.predictions:
@@ -2291,6 +3117,12 @@ def main() -> None:
         print(f"  mean outside plot: {channel_plots[0][0]}, {channel_plots[0][1]}")
         print(f"  2pct violation plot: {channel_plots[1][0]}, {channel_plots[1][1]}")
         print(f"  geometry penalty equivalent plot: {channel_plots[2][0]}, {channel_plots[2][1]}")
+    if junction_metrics_csv is not None:
+        print(f"  junction decision metrics: {junction_metrics_csv}")
+        print(f"  junction decision events: {junction_events_csv}")
+        print(f"  junction decision outcomes plot: {junction_outcome_plots[0]}, {junction_outcome_plots[1]}")
+        for model_name, paths in junction_confusion_plots.items():
+            print(f"  junction confusion {model_name}: {paths[0]}, {paths[1]}")
 
 
 if __name__ == "__main__":
