@@ -1,0 +1,143 @@
+\documentclass[11pt]{article}
+
+\usepackage[margin=1in]{geometry}
+\usepackage{graphicx}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage[font=small,labelfont=bf]{caption}
+
+\graphicspath{
+  {../outputs/models/rollout_model_comparison/}
+  {outputs/models/rollout_model_comparison/}
+}
+
+\title{Tangential Phase Error as a Precursor to Catastrophic Channel Escape}
+\author{}
+\date{}
+
+\begin{document}
+\maketitle
+
+\section{Motivation}
+
+Some rollout predictions eventually leave the physically admissible
+microfluidic channel. The purpose of this analysis is to test whether these
+catastrophic channel escapes are associated with accumulated longitudinal
+phase error along the channel trajectory.
+
+Catastrophic escape is defined using the existing channel-admissibility
+criterion:
+\[
+  \mathrm{outside\_fraction} \geq 0.95
+\]
+at any evaluable rollout step. Each rollout trajectory is therefore grouped as
+either escaping or non-escaping. This grouping is based on the predicted
+trajectory over the rollout horizon, while the signed phase error is measured
+relative to the corresponding true trajectory.
+
+\section{Signed Tangential Error}
+
+For droplet instance \(i\) at rollout step \(k\), the signed tangential
+position error is
+\[
+e_{\mathrm{tan},i}(k)
+=
+\left(
+\hat{\mathbf{x}}_i(k)-\mathbf{x}_i(k)
+\right)
+\cdot
+\mathbf{t}_i(k),
+\]
+where \(\hat{\mathbf{x}}_i(k)\) is the predicted droplet position,
+\(\mathbf{x}_i(k)\) is the true position, and \(\mathbf{t}_i(k)\) is the
+consistently oriented local channel tangent evaluated at the true position.
+
+The implementation defines the signed error as predicted position minus true
+position, dotted with the true-position tangent. Therefore, positive
+\(e_{\mathrm{tan}}\) means the predicted droplet is ahead of the true droplet
+along the oriented channel tangent, while negative \(e_{\mathrm{tan}}\) means
+the predicted droplet lags behind the true droplet.
+
+At each rollout step, the plotted statistic is the median signed tangential
+error over all valid rollout instances in each trajectory class. Because the
+validation set contains overlapping rollout windows, these summaries should be
+interpreted as statistics over valid rollout instances, not necessarily over
+unique physical track IDs.
+
+\section{Result}
+
+\begin{figure}[t]
+  \centering
+  \includegraphics[width=\linewidth]{phase_direction_stepwise_signed_tangential_error.png}
+  \caption{
+  Stepwise signed tangential error for catastrophic escaping and non-escaping
+  rollout trajectories. Each panel corresponds to one model class:
+  \texttt{history\_20}, \texttt{markovian}, and \texttt{geometry\_aware}.
+  Curves show the median signed tangential error at each rollout step, and the
+  shaded bands show the interquartile range from the 25th to 75th percentiles.
+  Negative values indicate predictions lagging behind the true droplet along
+  the true-position channel tangent; positive values indicate predictions
+  ahead of the true droplet.
+  }
+  \label{fig:phase-error}
+\end{figure}
+
+Figure~\ref{fig:phase-error} shows a clear separation between escaping and
+non-escaping rollout trajectories. Non-escaping trajectories remain relatively
+close to zero signed tangential error, while escaping trajectories develop a
+substantially larger systematic signed tangential error over rollout time.
+This separation is visible across all three model classes.
+
+The result indicates that catastrophic channel escapes are not merely isolated
+geometric violations at the final moment of failure. They are strongly
+associated with an earlier and progressively accumulating longitudinal phase
+mismatch between predicted and true droplet motion. This does not prove that
+phase error is the sole cause of escape, but it is consistent with phase error
+acting as a precursor that likely contributes to later geometric failure.
+
+\section{Physical Interpretation}
+
+A plausible physical mechanism is as follows. First, the model inaccurately
+predicts the amount or duration of local slowing. Second, the predicted droplet
+becomes out of phase with the true droplet along the channel. Third, subsequent
+predicted motion becomes inappropriate for the droplet's current predicted
+spatial location. Finally, the trajectory can cross the channel wall and
+undergo catastrophic escape.
+
+This phase error can originate from incorrectly learned junction dynamics. At
+a junction, the real droplet may slow or stall because of hydrodynamic
+interactions and local flow redistribution. If the model does not capture the
+correct magnitude or duration of this slowdown, it accumulates longitudinal
+phase error. The droplet may then enter subsequent curvature or branch
+dynamics from the wrong spatial phase, increasing the risk of wall escape.
+
+Phase mismatch may occur in either direction: the predicted droplet may lag
+behind the truth, or it may move ahead of the truth. Both cases can make later
+predicted motion inappropriate for the predicted location, particularly near
+junctions, bends, and crowded interaction regions.
+
+\section{Implications}
+
+Geometry regularization alone cannot fully correct this failure mode if it
+only penalizes the eventual geometric violation. Such a penalty can discourage
+wall crossing, but it does not necessarily restore the missing junction or
+interaction dynamics that created the accumulated phase error.
+
+The finding motivates a more physics-informed model state. A natural next
+step is to include a position-dependent background fluid-flow representation,
+with later extensions potentially incorporating droplet morphology or
+deformation descriptors. This should be viewed as motivation for future work,
+not as a demonstrated solution in the present analysis.
+
+\section{Limitations}
+
+This analysis is associative: trajectories are grouped by whether they
+eventually escape, and the observed separation does not establish a unique
+causal mechanism. The analysis also does not establish the exact source of the
+predicted velocity direction, nor does it prove that phase error is the only
+mechanism of catastrophic escape. Finally, because overlapping rollout windows
+are included, the summary statistics may reflect repeated rollout instances
+from the same physical droplet track.
+
+\end{document}

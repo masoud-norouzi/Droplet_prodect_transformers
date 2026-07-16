@@ -1,4 +1,4 @@
-This is pdfTeX, Version 3.141592653-2.6-1.40.25 (MiKTeX 23.10) (preloaded format=pdflatex 2023.10.15)  14 JUL 2026 21:57
+This is pdfTeX, Version 3.141592653-2.6-1.40.25 (MiKTeX 23.10) (preloaded format=pdflatex 2023.10.15)  14 JUL 2026 22:30
 entering extended mode
  restricted \write18 enabled.
  %&-line parsing enabled.
@@ -404,72 +404,79 @@ ion_outcomes.png> <../../outputs/models/rollout_model_comparison_junction_smoke
 /junction_confusion_history_20.png>] [3 <../../outputs/models/rollout_model_com
 parison_junction_smoke/junction_confusion_markovian.png> <../../outputs/models/
 rollout_model_comparison_junction_smoke/junction_confusion_geometry_aware.png>]
+[4
 
-Overfull \hbox (13.13475pt too wide) in paragraph at lines 170--170
+]
+Overfull \hbox (13.13475pt too wide) in paragraph at lines 194--194
 []\OT1/cmtt/m/n/10.95 outputs/models/rollout_model_comparison_junction_smoke/ju
 nction_decision_metrics.csv[] 
  []
 
 
-Overfull \hbox (7.38606pt too wide) in paragraph at lines 170--170
+Overfull \hbox (7.38606pt too wide) in paragraph at lines 194--194
 []\OT1/cmtt/m/n/10.95 outputs/models/rollout_model_comparison_junction_smoke/ju
 nction_decision_events.csv[] 
  []
 
 
-Overfull \hbox (18.88344pt too wide) in paragraph at lines 170--170
+Overfull \hbox (18.88344pt too wide) in paragraph at lines 194--194
 []\OT1/cmtt/m/n/10.95 outputs/models/rollout_model_comparison_junction_smoke/ju
 nction_decision_outcomes.png[] 
  []
 
 
-Overfull \hbox (36.1295pt too wide) in paragraph at lines 170--170
+Overfull \hbox (36.1295pt too wide) in paragraph at lines 194--194
 []\OT1/cmtt/m/n/10.95 outputs/models/rollout_model_comparison_junction_smoke/ju
 nction_confusion_history_20.png[] 
  []
 
 
-Overfull \hbox (30.38081pt too wide) in paragraph at lines 170--170
+Overfull \hbox (30.38081pt too wide) in paragraph at lines 194--194
 []\OT1/cmtt/m/n/10.95 outputs/models/rollout_model_comparison_junction_smoke/ju
 nction_confusion_markovian.png[] 
  []
 
 
-Overfull \hbox (59.12425pt too wide) in paragraph at lines 170--170
+Overfull \hbox (59.12425pt too wide) in paragraph at lines 194--194
 []\OT1/cmtt/m/n/10.95 outputs/models/rollout_model_comparison_junction_smoke/ju
 nction_confusion_geometry_aware.png[] 
  []
 
-[4
 
-] [5] (junction_decision_geometry_analysis.aux)
+Overfull \hbox (30.38081pt too wide) in paragraph at lines 200--200
+[]\OT1/cmtt/m/n/10.95 outputs/models/rollout_model_comparison/junction_decision
+_catastrophic_escape_table.csv[] 
+ []
+
+[5] (junction_decision_geometry_analysis.aux)
  ***********
 LaTeX2e <2023-06-01> patch level 1
 L3 programming layer <2023-08-29>
  ***********
 Package rerunfilecheck Info: File `junction_decision_geometry_analysis.out' has
  not changed.
-(rerunfilecheck)             Checksum: 679B019A7CB08F0444C16439D38B4083;1395.
+(rerunfilecheck)             Checksum: D82B573B8C6EEAC6C6C989BBAA70034A;1417.
  ) 
 Here is how much of TeX's memory you used:
- 9446 strings out of 475247
- 148530 string characters out of 5767592
+ 9445 strings out of 475247
+ 148523 string characters out of 5767592
  1931785 words of memory out of 5000000
  30856 multiletter control sequences out of 15000+600000
  563442 words of font info for 54 fonts, out of 8000000 for 9000
  1141 hyphenation exceptions out of 8191
- 75i,8n,79p,370b,575s stack positions out of 10000i,1000n,20000p,200000b,200000s
+ 75i,8n,79p,392b,500s stack positions out of 10000i,1000n,20000p,200000b,200000s
  <C:\Users\My Family\AppData\Local\MiKTeX\fonts/pk/ljfour/jknappen/ec/dpi600\
 tcrm1095.pk><C:/Program Files/MiKTeX/fonts/type1/public/amsfonts/cm/cmbx10.pfb>
 <C:/Program Files/MiKTeX/fonts/type1/public/amsfonts/cm/cmbx12.pfb><C:/Program 
-Files/MiKTeX/fonts/type1/public/amsfonts/cm/cmr10.pfb><C:/Program Files/MiKTeX/
-fonts/type1/public/amsfonts/cm/cmr12.pfb><C:/Program Files/MiKTeX/fonts/type1/p
-ublic/amsfonts/cm/cmr17.pfb><C:/Program Files/MiKTeX/fonts/type1/public/amsfont
-s/cm/cmtt10.pfb>
-Output written on junction_decision_geometry_analysis.pdf (5 pages, 324256 byte
+Files/MiKTeX/fonts/type1/public/amsfonts/cm/cmmi10.pfb><C:/Program Files/MiKTeX
+/fonts/type1/public/amsfonts/cm/cmr10.pfb><C:/Program Files/MiKTeX/fonts/type1/
+public/amsfonts/cm/cmr12.pfb><C:/Program Files/MiKTeX/fonts/type1/public/amsfon
+ts/cm/cmr17.pfb><C:/Program Files/MiKTeX/fonts/type1/public/amsfonts/cm/cmsy10.
+pfb><C:/Program Files/MiKTeX/fonts/type1/public/amsfonts/cm/cmtt10.pfb>
+Output written on junction_decision_geometry_analysis.pdf (5 pages, 344229 byte
 s).
 PDF statistics:
- 115 PDF objects out of 1000 (max. 8388607)
- 21 named destinations out of 1000 (max. 500000)
+ 124 PDF objects out of 1000 (max. 8388607)
+ 20 named destinations out of 1000 (max. 500000)
  85 words of extra memory for PDF output out of 10000 (max. 10000000)
 

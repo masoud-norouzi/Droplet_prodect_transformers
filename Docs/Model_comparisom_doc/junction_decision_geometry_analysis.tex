@@ -103,59 +103,83 @@ events are excluded from these matrices.
 \end{figure}
 
 \clearpage
-\section{Geometry Violations for Wrong Branch Decisions}
+\section{Catastrophic Channel Escape by Branch Decision}
 
-A geometry violation is defined as a predicted droplet ellipse outside-channel
-fraction greater than the configured geometry tolerance.  The table below asks:
-among droplets that committed to the wrong outgoing branch, how many also
-violated the channel geometry?
+The previous generic geometry-violation summaries used a low outside-channel
+threshold and were not the right diagnostic for branch-decision interpretation.
+They are therefore not reported here.  Instead, this section uses a stricter
+catastrophic escape criterion:
+
+\begin{quote}
+predicted ellipse outside-channel fraction $\geq 0.95$ at any evaluable rollout
+step after predicted branch commitment.
+\end{quote}
+
+This asks whether a committed branch prediction later becomes a complete channel
+escape.  The analysis was run by the standalone utility:
+\begin{verbatim}
+python -m utils.junction_catastrophic_escape_table
+\end{verbatim}
 
 \begin{table}[h]
 \centering
-\caption{Geometry violations among wrong-branch decisions.}
-\begin{tabular}{lrrrr}
+\caption{Catastrophic channel escape after predicted branch commitment.}
+\begin{tabular}{lllrrr}
 \toprule
-Model & Wrong branch & Violating & Fraction & Median peak outside \\
+Model & True branch & Pred branch & Status & N & Escape \% \\
 \midrule
-History-20 & 243 & 142 & 58.4\% & 0.030 \\
-Markovian & 387 & 244 & 63.0\% & 0.053 \\
-Geometry-aware & 435 & 225 & 51.7\% & 0.021 \\
+History-20 & left & left & correct & 1,441 & 0.35 \\
+History-20 & left & right & wrong & 109 & 1.83 \\
+History-20 & right & right & correct & 3,274 & 0.12 \\
+History-20 & right & left & wrong & 134 & 0.75 \\
+\midrule
+Markovian & left & left & correct & 1,349 & 0.96 \\
+Markovian & left & right & wrong & 189 & 9.52 \\
+Markovian & right & right & correct & 3,165 & 0.47 \\
+Markovian & right & left & wrong & 198 & 3.03 \\
+\midrule
+Geometry-aware & left & left & correct & 1,255 & 3.35 \\
+Geometry-aware & left & right & wrong & 280 & 0.00 \\
+Geometry-aware & right & right & correct & 3,243 & 0.03 \\
+Geometry-aware & right & left & wrong & 155 & 0.00 \\
 \bottomrule
 \end{tabular}
 \end{table}
 
-The geometry-aware model has more wrong-branch decisions in this saved run, but
-a smaller fraction of those wrong decisions leave the channel.  Its median peak
-outside-channel fraction is also lower than the Markovian baseline.  This
-suggests that the geometry-aware model may reduce physically impossible wrong
-rollouts even when it does not correct the branch-choice decision itself.
+Under this stricter complete-escape definition, the geometry-aware model has no
+catastrophic escapes among strict wrong-branch junction events.  This does not
+mean that the geometry-aware model never produces visually catastrophic branch
+tracking failures.  It means that, within the strict incoming-to-outgoing
+junction-decision event set, its wrong-branch predictions did not reach
+outside-channel fraction $\geq 0.95$ after predicted commitment.
 
-\section{Geometry Violations for Correct Branch Decisions}
+\section{Why Track 3050 Is Not in the Strict Junction Table}
 
-The same geometry test was repeated for droplets whose predicted branch decision
-was correct.  This asks whether the model chooses the right outgoing channel but
-still places the droplet footprint outside the admissible channel.
+The geometry-aware video for track \texttt{3050} is a real catastrophic failure:
+the true droplet is on the left branch, the prediction moves to the right, and
+the predicted footprint eventually reaches outside-channel fraction 1.0.  The
+specific video case is validation window 956, slot 5, track \texttt{3050}.
 
-\begin{table}[h]
-\centering
-\caption{Geometry violations among correct-branch decisions.}
-\begin{tabular}{lrrrr}
-\toprule
-Model & Correct branch & Violating & Fraction & Median peak outside \\
-\midrule
-History-20 & 4,715 & 687 & 14.6\% & 0.000 \\
-Markovian & 4,514 & 1,596 & 35.4\% & 0.005 \\
-Geometry-aware & 4,498 & 2,801 & 62.3\% & 0.046 \\
-\bottomrule
-\end{tabular}
-\end{table}
+That case is not counted in the strict junction-decision table because the true
+trajectory is already assigned to the left branch at rollout step 1.  It does
+not contain an explicit \texttt{inlet -> left} transition inside the rollout
+window.  Therefore it fails the strict true-event criterion:
 
-This is the surprising result.  In this saved prediction set, the geometry-aware
-model often predicts the correct outgoing branch but still violates the channel
-footprint criterion.  This points to a placement or wall-clearance failure rather
-than a branch-selection failure: the model may be choosing the correct channel
-while placing droplets too close to, or partially outside, the detected channel
-boundary.
+\begin{quote}
+explicit incoming branch assignment before outgoing branch commitment.
+\end{quote}
+
+Track \texttt{3050} should therefore be interpreted as a
+\textbf{post-commitment branch tracking failure}, not as a strict
+incoming-to-outgoing junction decision event.  This distinction matters:
+
+\begin{itemize}
+  \item \textbf{Junction decision failures:} the droplet enters from the inlet
+  and the model chooses the wrong outgoing branch within the rollout window.
+  \item \textbf{Post-commitment branch tracking failures:} the droplet is
+  already on or near a branch at the start of the rollout, and the model later
+  diverges into another branch or leaves the channel.
+\end{itemize}
 
 \section{Output Files}
 
@@ -169,25 +193,24 @@ outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_markov
 outputs/models/rollout_model_comparison_junction_smoke/junction_confusion_geometry_aware.png
 \end{verbatim}
 
-Geometry follow-up outputs:
+Catastrophic escape table:
 \begin{verbatim}
-outputs/models/rollout_model_comparison_wrong_decision_geometry/
-outputs/models/rollout_model_comparison_correct_decision_geometry/
+utils/junction_catastrophic_escape_table.py
+outputs/models/rollout_model_comparison/junction_decision_catastrophic_escape_table.csv
 \end{verbatim}
 
 \section{Interpretation}
 
 The decision and geometry diagnostics together show that branch choice and
-physical admissibility are not the same error mode.  The history-based model has
-the best branch-decision accuracy and the lowest rate of geometry violation
-among correct decisions.  The Markovian model is worse on both branch decisions
-and physical placement.  The geometry-aware model reduces the severity of
-wrong-branch geometry violations, but in this saved run it has a high rate of
-geometry violations even for correct branch decisions.
+complete channel escape are not the same error mode.  The history-based model
+has the best branch-decision accuracy.  The Markovian model has the largest
+catastrophic escape rate among wrong \texttt{left -> right} decisions.  The
+geometry-aware model shows zero catastrophic escape among strict wrong-branch
+junction events, but it can still fail catastrophically in post-commitment branch
+tracking windows such as track \texttt{3050}.
 
-The next useful diagnostic is to inspect geometry-aware correct-branch events
-with large outside-channel fractions.  These cases should reveal whether the
-model is systematically hugging one wall, cutting corners at the junction, or
-using bounding-box footprints that are too large for the local channel width.
+The next useful diagnostic is therefore separate from the strict junction-entry
+analysis: explicitly measure post-commitment branch tracking failures for
+trajectories that begin already assigned to \texttt{left} or \texttt{right}.
 
 \end{document}
